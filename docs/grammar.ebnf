@@ -1,0 +1,99 @@
+(* ============================================================================
+   TIRED — formal grammar (EBNF) for the implemented language.
+   Whitespace and `// line comments` are insignificant between tokens.
+   ============================================================================ *)
+
+program        = { item } ;
+item           = endpoint | type_decl | flow | mock | test | statement ;
+
+(* ---- declarations ---- *)
+
+endpoint       = "endpoint" ident "{" { setting } "}" ;
+setting        = name ":" value { value } ;          (* e.g.  retry: 3 backoff(exponential) *)
+
+type_decl      = ("type" | "contract") ident [ "." ident ] "{" { field } "}" ;
+field          = name ":" type [ "where" "(" constraint ")" ] [ "," ] ;
+constraint     = [ "length" ] ( cmp_op expr | "in" expr ".." expr ) ;
+
+flow           = "flow" ident "(" [ param { "," param } ] ")" [ "->" type ] block ;
+param          = name ":" type ;
+
+mock           = "mock" ident "{" { mock_route } "}" ;
+mock_route     = ident path "->" expr ;              (* ident = HTTP method: GET, POST, ... *)
+
+test           = "test" string block ;
+
+(* ---- types ---- *)
+
+type           = type_atom { "|" type_atom } ;       (* union, e.g. NotFound | Unauthorized *)
+type_atom      = ident [ "<" type { "," type } ">" ] { "[]" | "?" } ;
+
+(* ---- statements ---- *)
+
+block          = "{" { statement } "}" ;
+statement      = fetch
+               | "let" ident "=" expr
+               | "log" expr
+               | "parallel" block
+               | "return" [ expr ]
+               | "assert" expr
+               | "using" "mock" ident
+               | expr [ "->" binding ] ;
+
+fetch          = "fetch" ident path
+                 [ "params" "{" { name ":" expr [ "," ] } "}" ]
+                 { "|" pipeline_op }
+                 [ "->" binding ] ;
+binding        = ident [ ":" type ] ;
+
+path           = "/" path_seg { "/" path_seg } ;
+path_seg       = ident | int | "{" expr "}" ;
+
+pipeline_op    = "filter" "(" expr ")"
+               | "map"    "(" expr ")"
+               | "sort"   "(" "by" ":" expr [ "asc" | "desc" ] ")"
+               | "limit"  "(" expr ")" ;
+
+(* ---- expressions (precedence: or < and < cmp < add < mul < unary < postfix) ---- *)
+
+expr           = or_expr ;
+or_expr        = and_expr { "or" and_expr } ;
+and_expr       = cmp_expr { "and" cmp_expr } ;
+cmp_expr       = add_expr { cmp_op add_expr } ;
+add_expr       = mul_expr { ("+" | "-") mul_expr } ;
+mul_expr       = unary { "*" unary } ;
+unary          = [ "not" | "-" ] postfix ;
+postfix        = primary { "." name | "(" [ expr { "," expr } ] ")" } ;
+
+primary        = int | float | string | duration | "true" | "false" | "null"
+               | "$" ident                              (* env var *)
+               | "." name                               (* implicit pipeline element field *)
+               | ident "=>" expr                        (* lambda *)
+               | [ ident ] record                       (* named or bare record literal *)
+               | array
+               | match_expr
+               | "(" expr ")"
+               | ident ;
+
+record         = "{" { name ":" expr [ "," ] } "}" ;
+array          = "[" { ("..." expr | expr) [ "," ] } "]" ;
+
+match_expr     = "match" expr "{" { match_arm } "}" ;
+match_arm      = pattern "=>" arm_body [ "," ] ;
+arm_body       = expr | block | retry_chain ;
+retry_chain    = { (call | "wait" "(" expr ")") "then" } "retry" ;
+
+pattern        = "_" | name | ident "(" [ pattern { "," pattern } ] ")" ;
+                 (* Ok(x), Err(NotFound), Err(RateLimit(ms)); a bare upper-case
+                    name is a nullary constructor, a lower-case name is a binding *)
+
+cmp_op         = "==" | "!=" | "<" | "<=" | ">" | ">=" ;
+name           = ident | keyword ;                      (* keywords may be used as names *)
+
+(* ---- terminals ---- *)
+
+string         = '"' { char | "{" expr "}" } '"' ;      (* {expr} interpolation; {{ }} escapes *)
+duration       = int ("ms" | "s" | "m" | "min" | "h" | "d") ;
+ident          = (letter | "_") { letter | digit | "_" } ;
+int            = digit { digit } ;
+float          = digit { digit } "." digit { digit } ;
