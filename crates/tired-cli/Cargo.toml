@@ -1,0 +1,20 @@
+[package]
+name = "tired-cli"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "The `tired` command-line driver: run, check, fmt, test, explain"
+
+[[bin]]
+name = "tired"
+path = "src/main.rs"
+
+[dependencies]
+tired-syntax.workspace = true
+tired-compiler.workspace = true
+tired-runtime.workspace = true
+tokio.workspace = true
+
+[lints.clippy]
+all = "warn"
