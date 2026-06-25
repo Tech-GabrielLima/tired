@@ -1,0 +1,33 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/tired-syntax",
+    "crates/tired-compiler",
+    "crates/tired-runtime",
+    "crates/tired-cli",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.82"
+license = "MIT"
+authors = ["Gabriel Lima"]
+repository = "https://github.com/gabriel/tired"
+description = "TIRED — a compiled domain-specific language for consuming HTTP APIs"
+
+[workspace.dependencies]
+tired-syntax = { path = "crates/tired-syntax" }
+tired-compiler = { path = "crates/tired-compiler" }
+tired-runtime = { path = "crates/tired-runtime" }
+
+# Runtime-only third-party deps. The compiler front-end (syntax + compiler crates)
+# is deliberately dependency-free std-only Rust; only the runtime touches the network.
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time", "net"] }
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json", "http2", "gzip"] }
+serde_json = "1"
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1
