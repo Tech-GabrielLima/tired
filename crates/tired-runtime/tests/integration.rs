@@ -123,6 +123,24 @@ fn parallel_inference_overlaps_independent_fetches() {
 }
 
 #[test]
+fn duplicate_requests_hit_the_network_once() {
+    let server = spawn_server(Duration::from_millis(5));
+    let src = format!(
+        r#"
+        endpoint S {{ base: "{}" }}
+        fetch S /users/gabriel -> a
+        fetch S /users/gabriel -> b
+        log "{{a.login}} {{b.login}}"
+        "#,
+        server.base
+    );
+    let runtime = build(&src);
+    rt().block_on(async { runtime.run().await }).expect("run");
+    // Both bindings are used, but the identical request is deduplicated → 1 network call.
+    assert_eq!(server.count.load(Ordering::SeqCst), 1);
+}
+
+#[test]
 fn dead_request_is_never_sent() {
     let server = spawn_server(Duration::from_millis(10));
     let src = format!(

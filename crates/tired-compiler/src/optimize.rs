@@ -1,5 +1,8 @@
-//! The optimizer — TIRED's two flagship passes:
+//! The optimizer — TIRED's flagship passes:
 //!
+//! * **Request deduplication (CSE).** Two `fetch`es that issue the *identical* request
+//!   (same endpoint, path, params, pipeline — and the same inputs) are collapsed: the
+//!   later one is rewritten to reuse the first's result. The same URL is never hit twice.
 //! * **Dead-request elimination.** A `fetch` whose result is never observed (directly
 //!   or transitively) is removed and reported. Zero bytes leave the machine for it.
 //! * **Parallel inference.** Within a body the nodes form a dependency DAG; we group
@@ -7,7 +10,10 @@
 //!   so the executor runs a whole wave concurrently — turning sequentially-written
 //!   fetches into a parallel schedule without the programmer asking.
 
+use tired_syntax::ast::{Expr, PathSeg};
 use tired_syntax::diag::{Diagnostic, Diagnostics};
+use tired_syntax::pretty;
+use tired_syntax::span::Spanned;
 
 use crate::ir::*;
 
@@ -26,6 +32,7 @@ pub fn optimize(main: &mut Body, flows: &mut [Flow], tests: &mut [Test]) -> Diag
 }
 
 fn optimize_body(body: &mut Body, diags: &mut Diagnostics) {
+    dedup_requests(body, diags);
     liveness(body, diags);
     schedule_waves(body);
     // Recurse into the nested bodies that live inside match arms.
@@ -38,6 +45,87 @@ fn optimize_body(body: &mut Body, diags: &mut Diagnostics) {
             }
         }
     }
+}
+
+/// Collapse identical requests. A fetch whose request signature (endpoint + path +
+/// params + pipeline + the producers of its inputs) matches an earlier fetch is rewritten
+/// to simply reuse the earlier binding — so the network sees the request only once.
+fn dedup_requests(body: &mut Body, diags: &mut Diagnostics) {
+    use std::collections::HashMap;
+    let mut seen: HashMap<String, (NodeId, String)> = HashMap::new();
+    // (alias node id, first node id, first binding name)
+    let mut rewrites: Vec<(NodeId, NodeId, String)> = Vec::new();
+
+    for node in &body.nodes {
+        if let NodeKind::Fetch(f) = &node.kind {
+            let sig = fetch_sig(f, &node.reads, &node.deps);
+            match seen.get(&sig) {
+                Some((first_id, first_bind)) => {
+                    if node.binding.is_some() {
+                        rewrites.push((node.id, *first_id, first_bind.clone()));
+                    }
+                }
+                None => {
+                    if let Some(bind) = &node.binding {
+                        seen.insert(sig, (node.id, bind.clone()));
+                    }
+                }
+            }
+        }
+    }
+
+    for (alias_id, first_id, first_bind) in rewrites {
+        let (endpoint, path) = match &body.nodes[alias_id].kind {
+            NodeKind::Fetch(f) => (f.endpoint.clone(), render_path(&f.path)),
+            _ => continue,
+        };
+        diags.push(
+            Diagnostic::warning(
+                body.nodes[alias_id].span,
+                format!("duplicate request `{endpoint} {path}` reuses an identical earlier call"),
+            )
+            .with_note("request deduplication: the network is hit once; the second call is free"),
+        );
+        let span = body.nodes[alias_id].span;
+        body.nodes[alias_id].kind =
+            NodeKind::Let(Expr::Ident(Spanned::new(first_bind.clone(), span)));
+        body.nodes[alias_id].reads = vec![first_bind];
+        body.nodes[alias_id].deps = vec![first_id];
+    }
+}
+
+/// A request signature that is equal iff two fetches would issue the exact same request
+/// with the exact same inputs (same dependency producers).
+fn fetch_sig(f: &FetchIr, reads: &[String], deps: &[NodeId]) -> String {
+    let mut s = format!("GET {}", f.endpoint);
+    for seg in &f.path.segments {
+        s.push('/');
+        match seg {
+            PathSeg::Literal(l) => s.push_str(l),
+            PathSeg::Param(e) => {
+                s.push('{');
+                s.push_str(&pretty::expr(e));
+                s.push('}');
+            }
+        }
+    }
+    let mut params: Vec<String> = f
+        .params
+        .iter()
+        .map(|(k, e)| format!("{k}={}", pretty::expr(e)))
+        .collect();
+    params.sort();
+    s.push('?');
+    s.push_str(&params.join("&"));
+    for op in &f.pipeline {
+        s.push('|');
+        s.push_str(&pretty::pipeline_op(op));
+    }
+    let mut r = reads.to_vec();
+    r.sort();
+    let mut d: Vec<String> = deps.iter().map(|x| x.to_string()).collect();
+    d.sort();
+    format!("{s}#reads[{}]#deps[{}]", r.join(","), d.join(","))
 }
 
 /// Backward reachability from observable (effect) nodes. Anything not reached is dead;
@@ -229,6 +317,45 @@ mod tests {
             "plan: {}",
             render_plan(&main, &[], &[])
         );
+    }
+
+    #[test]
+    fn identical_requests_are_deduplicated() {
+        let src = r#"
+            endpoint A { base: "x" }
+            fetch A /users/gabriel -> a
+            fetch A /users/gabriel -> b
+            log "{a} {b}"
+        "#;
+        let (main, _f, _t, diags) = compile(src);
+        let live_fetches = main
+            .nodes
+            .iter()
+            .filter(|n| n.live && n.kind.is_fetch())
+            .count();
+        assert_eq!(live_fetches, 1, "plan: {}", render_plan(&main, &[], &[]));
+        let warns: Vec<_> = diags.items().iter().map(|d| d.message.clone()).collect();
+        assert!(
+            warns.iter().any(|m| m.contains("duplicate request")),
+            "{warns:?}"
+        );
+    }
+
+    #[test]
+    fn distinct_requests_are_not_deduplicated() {
+        let src = r#"
+            endpoint A { base: "x" }
+            fetch A /users/a -> a
+            fetch A /users/b -> b
+            log "{a} {b}"
+        "#;
+        let (main, _f, _t, _d) = compile(src);
+        let live_fetches = main
+            .nodes
+            .iter()
+            .filter(|n| n.live && n.kind.is_fetch())
+            .count();
+        assert_eq!(live_fetches, 2);
     }
 
     #[test]

@@ -189,10 +189,48 @@ pub struct Binding {
 
 #[derive(Clone, Debug)]
 pub enum PipelineOp {
-    Filter { lambda: Expr, span: Span },
-    Map { lambda: Expr, span: Span },
-    Sort { by: Expr, desc: bool, span: Span },
-    Limit { count: Expr, span: Span },
+    Filter {
+        lambda: Expr,
+        span: Span,
+    },
+    Map {
+        lambda: Expr,
+        span: Span,
+    },
+    Sort {
+        by: Expr,
+        desc: bool,
+        span: Span,
+    },
+    Limit {
+        count: Expr,
+        span: Span,
+    },
+    Skip {
+        count: Expr,
+        span: Span,
+    },
+    Reverse {
+        span: Span,
+    },
+    /// Deduplicate, optionally by a key expression.
+    Unique {
+        by: Option<Expr>,
+        span: Span,
+    },
+    /// Flatten one level of nested arrays.
+    Flatten {
+        span: Span,
+    },
+    /// Terminal: the number of elements (an `Integer`).
+    Count {
+        span: Span,
+    },
+    /// Terminal: the sum of the elements (or of `by` over each element).
+    Sum {
+        by: Option<Expr>,
+        span: Span,
+    },
 }
 
 impl PipelineOp {
@@ -201,7 +239,13 @@ impl PipelineOp {
             PipelineOp::Filter { span, .. }
             | PipelineOp::Map { span, .. }
             | PipelineOp::Sort { span, .. }
-            | PipelineOp::Limit { span, .. } => *span,
+            | PipelineOp::Limit { span, .. }
+            | PipelineOp::Skip { span, .. }
+            | PipelineOp::Reverse { span }
+            | PipelineOp::Unique { span, .. }
+            | PipelineOp::Flatten { span }
+            | PipelineOp::Count { span }
+            | PipelineOp::Sum { span, .. } => *span,
         }
     }
     pub fn name(&self) -> &'static str {
@@ -210,6 +254,12 @@ impl PipelineOp {
             PipelineOp::Map { .. } => "map",
             PipelineOp::Sort { .. } => "sort",
             PipelineOp::Limit { .. } => "limit",
+            PipelineOp::Skip { .. } => "skip",
+            PipelineOp::Reverse { .. } => "reverse",
+            PipelineOp::Unique { .. } => "unique",
+            PipelineOp::Flatten { .. } => "flatten",
+            PipelineOp::Count { .. } => "count",
+            PipelineOp::Sum { .. } => "sum",
         }
     }
 }

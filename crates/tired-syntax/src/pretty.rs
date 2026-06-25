@@ -144,7 +144,7 @@ fn binding(b: &Binding) -> String {
     }
 }
 
-fn pipeline_op(op: &PipelineOp) -> String {
+pub fn pipeline_op(op: &PipelineOp) -> String {
     match op {
         PipelineOp::Filter { lambda, .. } => format!("filter({})", expr(lambda)),
         PipelineOp::Map { lambda, .. } => format!("map({})", expr(lambda)),
@@ -156,6 +156,18 @@ fn pipeline_op(op: &PipelineOp) -> String {
             )
         }
         PipelineOp::Limit { count, .. } => format!("limit({})", expr(count)),
+        PipelineOp::Skip { count, .. } => format!("skip({})", expr(count)),
+        PipelineOp::Reverse { .. } => "reverse()".to_string(),
+        PipelineOp::Flatten { .. } => "flatten()".to_string(),
+        PipelineOp::Count { .. } => "count()".to_string(),
+        PipelineOp::Unique { by, .. } => match by {
+            Some(e) => format!("unique(by: {})", expr(e)),
+            None => "unique()".to_string(),
+        },
+        PipelineOp::Sum { by, .. } => match by {
+            Some(e) => format!("sum(by: {})", expr(e)),
+            None => "sum()".to_string(),
+        },
     }
 }
 

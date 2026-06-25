@@ -269,7 +269,15 @@ fn pipeline_reads(op: &PipelineOp, out: &mut BTreeSet<String>) {
             free_vars(lambda, out)
         }
         PipelineOp::Sort { by, .. } => free_vars(by, out),
-        PipelineOp::Limit { count, .. } => free_vars(count, out),
+        PipelineOp::Limit { count, .. } | PipelineOp::Skip { count, .. } => free_vars(count, out),
+        PipelineOp::Unique { by: Some(e), .. } | PipelineOp::Sum { by: Some(e), .. } => {
+            free_vars(e, out)
+        }
+        PipelineOp::Reverse { .. }
+        | PipelineOp::Flatten { .. }
+        | PipelineOp::Count { .. }
+        | PipelineOp::Unique { by: None, .. }
+        | PipelineOp::Sum { by: None, .. } => {}
     }
 }
 

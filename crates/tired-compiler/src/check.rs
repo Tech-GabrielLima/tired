@@ -24,6 +24,7 @@ pub struct Analysis {
 
 pub fn check(program: &Program) -> (Analysis, Diagnostics) {
     let mut ck = Checker::new(program);
+    ck.check_declarations(program);
     ck.run(program);
     ck.finish()
 }
@@ -150,6 +151,23 @@ impl Checker {
             flows: self.flows.into_iter().collect(),
         };
         (analysis, self.diags)
+    }
+
+    /// Structural checks on declarations themselves (independent of bodies).
+    fn check_declarations(&mut self, program: &Program) {
+        for item in &program.items {
+            if let Item::Type(t) = item {
+                let mut seen: HashSet<String> = HashSet::new();
+                for f in &t.fields {
+                    if !seen.insert(f.name.node.clone()) {
+                        self.diags.push(Diagnostic::error(
+                            f.name.span,
+                            format!("duplicate field `{}` in `{}`", f.name.node, t.name.node),
+                        ));
+                    }
+                }
+            }
+        }
     }
 
     fn run(&mut self, program: &Program) {
@@ -285,9 +303,18 @@ impl Checker {
             PipelineOp::Sort { by, .. } => {
                 self.infer(by, scope, Some(elem));
             }
-            PipelineOp::Limit { count, .. } => {
+            PipelineOp::Limit { count, .. } | PipelineOp::Skip { count, .. } => {
                 self.infer(count, scope, None);
             }
+            // `by` (when present) is evaluated against the element type.
+            PipelineOp::Unique { by: Some(e), .. } | PipelineOp::Sum { by: Some(e), .. } => {
+                self.infer(e, scope, Some(elem));
+            }
+            PipelineOp::Reverse { .. }
+            | PipelineOp::Flatten { .. }
+            | PipelineOp::Count { .. }
+            | PipelineOp::Unique { by: None, .. }
+            | PipelineOp::Sum { by: None, .. } => {}
         }
     }
 
@@ -671,6 +698,15 @@ mod tests {
             .iter()
             .map(|d| d.message.clone())
             .collect()
+    }
+
+    #[test]
+    fn duplicate_field_is_an_error() {
+        let e = errs("type Repo { id: Integer  name: String  id: Float }");
+        assert!(
+            e.iter().any(|m| m.contains("duplicate field `id`")),
+            "{e:?}"
+        );
     }
 
     #[test]

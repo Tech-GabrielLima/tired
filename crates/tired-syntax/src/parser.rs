@@ -565,6 +565,16 @@ impl Parser {
         })
     }
 
+    /// Parse an optional `by: <expr>` argument inside a pipeline op's parentheses.
+    fn parse_optional_by(&mut self) -> PResult<Option<Expr>> {
+        if self.at(&TokenKind::RParen) {
+            return Ok(None);
+        }
+        self.expect(TokenKind::By)?;
+        self.expect(TokenKind::Colon)?;
+        Ok(Some(self.parse_expr()?))
+    }
+
     fn parse_pipeline_op(&mut self) -> PResult<PipelineOp> {
         let start = self.cur_span();
         let name = self.take_ident()?;
@@ -600,10 +610,48 @@ impl Parser {
                     span: start.merge(self.cur_span()),
                 }
             }
-            "limit" => {
+            "limit" | "take" => {
                 let count = self.parse_expr()?;
                 PipelineOp::Limit {
                     count,
+                    span: start.merge(self.cur_span()),
+                }
+            }
+            "skip" => {
+                let count = self.parse_expr()?;
+                PipelineOp::Skip {
+                    count,
+                    span: start.merge(self.cur_span()),
+                }
+            }
+            // `pluck(.field)` is sugar for `map(.field)`.
+            "pluck" => {
+                let lambda = self.parse_expr()?;
+                PipelineOp::Map {
+                    lambda,
+                    span: start.merge(self.cur_span()),
+                }
+            }
+            "reverse" => PipelineOp::Reverse {
+                span: start.merge(self.cur_span()),
+            },
+            "flatten" => PipelineOp::Flatten {
+                span: start.merge(self.cur_span()),
+            },
+            "count" => PipelineOp::Count {
+                span: start.merge(self.cur_span()),
+            },
+            "unique" => {
+                let by = self.parse_optional_by()?;
+                PipelineOp::Unique {
+                    by,
+                    span: start.merge(self.cur_span()),
+                }
+            }
+            "sum" => {
+                let by = self.parse_optional_by()?;
+                PipelineOp::Sum {
+                    by,
                     span: start.merge(self.cur_span()),
                 }
             }
@@ -612,7 +660,7 @@ impl Parser {
                 return self.err(
                     span,
                     format!(
-                        "unknown pipeline operator `{other}` (expected filter, map, sort or limit)"
+                        "unknown pipeline operator `{other}` (expected filter, map, sort, limit/take, skip, pluck, reverse, unique, flatten, count or sum)"
                     ),
                 );
             }

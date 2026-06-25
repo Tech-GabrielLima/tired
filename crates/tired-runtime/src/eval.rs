@@ -318,17 +318,80 @@ pub fn apply_pipeline(mut value: Value, ops: &[PipelineOp], env: &Env) -> EvalRe
                 Value::Array(keyed.into_iter().map(|(_, v)| v).collect())
             }
             PipelineOp::Limit { count, .. } => {
-                let n = match eval(count, env, None)? {
-                    Value::Int(n) => n.max(0) as usize,
-                    _ => return Err(RunError::new("limit() expects an integer")),
-                };
+                let n = count_arg(count, env, "limit")?;
                 let mut items = as_array(&value);
                 items.truncate(n);
                 Value::Array(items)
             }
+            PipelineOp::Skip { count, .. } => {
+                let n = count_arg(count, env, "skip")?;
+                let items = as_array(&value);
+                Value::Array(items.into_iter().skip(n).collect())
+            }
+            PipelineOp::Reverse { .. } => {
+                let mut items = as_array(&value);
+                items.reverse();
+                Value::Array(items)
+            }
+            PipelineOp::Flatten { .. } => {
+                let mut out = Vec::new();
+                for it in as_array(&value) {
+                    match it {
+                        Value::Array(inner) => out.extend(inner),
+                        other => out.push(other),
+                    }
+                }
+                Value::Array(out)
+            }
+            PipelineOp::Unique { by, .. } => {
+                let mut seen: Vec<Value> = Vec::new();
+                let mut out = Vec::new();
+                for it in as_array(&value) {
+                    let key = match by {
+                        Some(e) => eval(e, env, Some(&it))?,
+                        None => it.clone(),
+                    };
+                    if !seen.contains(&key) {
+                        seen.push(key);
+                        out.push(it);
+                    }
+                }
+                Value::Array(out)
+            }
+            PipelineOp::Count { .. } => Value::Int(as_array(&value).len() as i64),
+            PipelineOp::Sum { by, .. } => {
+                let mut acc = 0.0f64;
+                let mut all_int = true;
+                for it in as_array(&value) {
+                    let v = match by {
+                        Some(e) => eval(e, env, Some(&it))?,
+                        None => it.clone(),
+                    };
+                    match v {
+                        Value::Int(n) => acc += n as f64,
+                        Value::Float(f) => {
+                            acc += f;
+                            all_int = false;
+                        }
+                        _ => return Err(RunError::new("sum() expects numbers")),
+                    }
+                }
+                if all_int {
+                    Value::Int(acc as i64)
+                } else {
+                    Value::Float(acc)
+                }
+            }
         };
     }
     Ok(value)
+}
+
+fn count_arg(count: &Expr, env: &Env, op: &str) -> Result<usize, RunError> {
+    match eval(count, env, None)? {
+        Value::Int(n) => Ok(n.max(0) as usize),
+        _ => Err(RunError::new(format!("{op}() expects an integer"))),
+    }
 }
 
 // ---------- pattern matching ----------
