@@ -28,6 +28,7 @@ async fn main() -> ExitCode {
         "explain" | "plan" => cmd_explain(&args[1..]),
         "inspect" => cmd_inspect(&args[1..]).await,
         "replay" => cmd_replay(&args[1..]).await,
+        "schema" => cmd_schema(&args[1..]),
         "lsp" => {
             tired_lsp::run();
             ExitCode::SUCCESS
@@ -59,6 +60,7 @@ fn usage() {
          \x20 tired test    <file>\n\
          \x20 tired explain <file>\n\
          \x20 tired inspect <url|file.json> [TypeName]   # infer TIRED types from JSON\n\
+         \x20 tired schema  <file>                       # export types/contracts as JSON Schema\n\
          \x20 tired replay  <rec.json> <file>            # re-run offline from a recording\n\
          \x20 tired lsp                                  # run the language server (stdio)"
     );
@@ -192,6 +194,33 @@ async fn cmd_inspect(args: &[String]) -> ExitCode {
 
     print!("{}", infer::infer_types(&json, &name));
     ExitCode::SUCCESS
+}
+
+/// `tired schema <file>` — export the program's types/contracts as JSON Schema.
+fn cmd_schema(args: &[String]) -> ExitCode {
+    let Some(path) = args.first() else {
+        eprintln!("error: `tired schema` needs a file");
+        return ExitCode::FAILURE;
+    };
+    let Some(src) = read(path) else {
+        return ExitCode::FAILURE;
+    };
+    let (program, diags) = tired_syntax::parse(&src);
+    if diags.has_errors() {
+        report(&diags, &src, path);
+        return ExitCode::FAILURE;
+    }
+    let title = flag_value(args, "--title").unwrap_or_else(|| "TIRED types".into());
+    match tired_runtime::schema::to_json_schema(&program, &title) {
+        Some(s) => {
+            println!("{s}");
+            ExitCode::SUCCESS
+        }
+        None => {
+            eprintln!("no `type` or `contract` declarations found in {path}");
+            ExitCode::FAILURE
+        }
+    }
 }
 
 /// `tired replay <rec.json> <file>` — run a program offline against a recording.

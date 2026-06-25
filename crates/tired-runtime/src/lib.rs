@@ -13,6 +13,7 @@ mod http;
 pub mod infer;
 mod mock;
 mod record;
+pub mod schema;
 pub mod value;
 
 use std::collections::HashMap;
