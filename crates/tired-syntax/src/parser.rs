@@ -487,8 +487,30 @@ impl Parser {
     fn parse_fetch(&mut self) -> PResult<Stmt> {
         let start = self.cur_span();
         self.bump(); // fetch
+
+        // Optional HTTP method: `fetch POST Endpoint /path`. We only treat the first
+        // identifier as a method when it is a known verb *and* is followed by another
+        // identifier (the endpoint) — `fetch GitHub /x` keeps GitHub as the endpoint
+        // because it is followed by the path (`/`).
+        let method = if matches!(&self.cur(), TokenKind::Ident(m) if is_http_method(m))
+            && matches!(self.nth(1), TokenKind::Ident(_))
+        {
+            self.take_ident()?.node.to_uppercase()
+        } else {
+            "GET".to_string()
+        };
+
         let endpoint = self.take_ident()?;
         let path = self.parse_path()?;
+
+        // Optional request body: `body <expr>`.
+        let body = if self.ident_text() == Some("body") {
+            self.bump();
+            Some(self.parse_expr()?)
+        } else {
+            None
+        };
+
         let mut params = Vec::new();
         if self.eat(&TokenKind::Params) {
             self.expect(TokenKind::LBrace)?;
@@ -511,9 +533,11 @@ impl Parser {
             None
         };
         Ok(Stmt::Fetch(FetchStmt {
+            method,
             endpoint,
             path,
             params,
+            body,
             pipeline,
             bind,
             span: start.merge(self.prev),
@@ -1173,6 +1197,13 @@ impl Parser {
         }
         Some(expr)
     }
+}
+
+fn is_http_method(s: &str) -> bool {
+    matches!(
+        s.to_ascii_uppercase().as_str(),
+        "GET" | "POST" | "PUT" | "PATCH" | "DELETE" | "HEAD" | "OPTIONS"
+    )
 }
 
 fn bin(op: BinOp, lhs: Expr, rhs: Expr) -> Expr {

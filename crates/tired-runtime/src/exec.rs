@@ -247,7 +247,12 @@ impl Shared {
             query.push((k.clone(), eval(e, env, None)?.display()));
         }
 
-        let key = crate::record::request_key(&f.endpoint, &path, &query);
+        let body_json = match &f.body {
+            Some(e) => Some(crate::record::value_to_json(&eval(e, env, None)?)),
+            None => None,
+        };
+
+        let key = crate::record::request_key(&f.method, &f.endpoint, &path, &query);
 
         let outcome = if self.record.is_replay() {
             // Replay: serve the recorded outcome; a missing key is a hard error so the
@@ -259,7 +264,7 @@ impl Shared {
             })?
         } else if active.contains(&f.endpoint) {
             match self.mocks.get(&f.endpoint) {
-                Some(mock) => mock.lookup("GET", &path),
+                Some(mock) => mock.lookup(&f.method, &path),
                 None => Outcome::Failure(ErrValue::new(
                     "NotFound",
                     Some(404),
@@ -271,7 +276,10 @@ impl Shared {
                 .endpoints
                 .get(&f.endpoint)
                 .ok_or_else(|| RunError::new(format!("unknown endpoint `{}`", f.endpoint)))?;
-            let out = self.http.get(cfg, &path, &query).await;
+            let out = self
+                .http
+                .request(cfg, &f.method, &path, &query, body_json.as_ref())
+                .await;
             self.record.store(key, &out); // no-op unless in record mode
             out
         };

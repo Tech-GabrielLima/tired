@@ -272,6 +272,9 @@ impl Checker {
         for (_, v) in &f.params {
             self.infer(v, scope, None);
         }
+        if let Some(b) = &f.body {
+            self.infer(b, scope, None);
+        }
 
         // Determine the binding type and the pipeline element type.
         let binding_ty = f

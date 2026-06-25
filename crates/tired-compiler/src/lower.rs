@@ -84,6 +84,9 @@ fn lower_stmt(s: &Stmt, nodes: &mut Vec<Node>) {
             for (_, v) in &f.params {
                 free_vars(v, &mut reads);
             }
+            if let Some(b) = &f.body {
+                free_vars(b, &mut reads);
+            }
             for op in &f.pipeline {
                 pipeline_reads(op, &mut reads);
             }
@@ -91,9 +94,14 @@ fn lower_stmt(s: &Stmt, nodes: &mut Vec<Node>) {
                 f.bind.as_ref().and_then(|b| b.ty.as_ref()),
                 Some(TypeExpr::Generic(n, _)) if n == "Result"
             );
+            // A mutating request (anything but GET) is a side effect: it must keep its
+            // order, must never be deduplicated, and must never be eliminated even if its
+            // result is unused. We mark it as an effect node to get exactly that.
+            let is_mutation = f.method != "GET";
             push(
                 nodes,
                 NodeKind::Fetch(FetchIr {
+                    method: f.method.clone(),
                     endpoint: f.endpoint.node.clone(),
                     endpoint_span: f.endpoint.span,
                     path: f.path.clone(),
@@ -102,13 +110,14 @@ fn lower_stmt(s: &Stmt, nodes: &mut Vec<Node>) {
                         .iter()
                         .map(|(k, v)| (k.node.clone(), v.clone()))
                         .collect(),
+                    body: f.body.clone(),
                     pipeline: f.pipeline.clone(),
                     as_result,
                     contract_ty: f.bind.as_ref().and_then(|b| b.ty.clone()),
                 }),
                 f.bind.as_ref().map(|b| b.name.node.clone()),
                 reads,
-                false,
+                is_mutation,
                 f.span,
             );
         }

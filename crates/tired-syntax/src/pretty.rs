@@ -96,7 +96,15 @@ fn stmt(s: &Stmt, indent: usize) -> String {
     let p = pad(indent);
     match s {
         Stmt::Fetch(f) => {
-            let mut out = format!("{p}fetch {} {}", f.endpoint.node, path(&f.path));
+            let method = if f.method == "GET" {
+                String::new()
+            } else {
+                format!("{} ", f.method)
+            };
+            let mut out = format!("{p}fetch {method}{} {}", f.endpoint.node, path(&f.path));
+            if let Some(b) = &f.body {
+                out.push_str(&format!(" body {}", expr(b)));
+            }
             if !f.params.is_empty() {
                 let kvs: Vec<String> = f
                     .params

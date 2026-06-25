@@ -173,9 +173,13 @@ pub enum Stmt {
 
 #[derive(Clone, Debug)]
 pub struct FetchStmt {
+    /// HTTP method, uppercased. Defaults to `GET`.
+    pub method: String,
     pub endpoint: Name,
     pub path: PathPattern,
     pub params: Vec<(Name, Expr)>,
+    /// Optional request body (`body <expr>`), sent as JSON.
+    pub body: Option<Expr>,
     pub pipeline: Vec<PipelineOp>,
     pub bind: Option<Binding>,
     pub span: Span,

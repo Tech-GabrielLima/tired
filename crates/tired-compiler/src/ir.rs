@@ -53,10 +53,12 @@ pub enum NodeKind {
 
 #[derive(Clone, Debug)]
 pub struct FetchIr {
+    pub method: String,
     pub endpoint: String,
     pub endpoint_span: Span,
     pub path: PathPattern,
     pub params: Vec<(String, Expr)>,
+    pub body: Option<Expr>,
     pub pipeline: Vec<PipelineOp>,
     /// `true` if the binding was annotated `Result<...>` (opts into Ok/Err wrapping).
     pub as_result: bool,
@@ -103,7 +105,14 @@ pub struct Test {
 impl NodeKind {
     pub fn label(&self) -> String {
         match self {
-            NodeKind::Fetch(f) => format!("fetch {} {}", f.endpoint, render_path(&f.path)),
+            NodeKind::Fetch(f) => {
+                let m = if f.method == "GET" {
+                    String::new()
+                } else {
+                    format!("{} ", f.method)
+                };
+                format!("fetch {m}{} {}", f.endpoint, render_path(&f.path))
+            }
             NodeKind::Let(_) => "let".into(),
             NodeKind::Log(_) => "log".into(),
             NodeKind::Return(_) => "return".into(),

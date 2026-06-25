@@ -56,18 +56,24 @@ impl HttpEngine {
         }
     }
 
-    /// Perform a GET against `cfg.base + path` with `query`, applying the endpoint's
-    /// timeout, auth, cache and retry policy. Returns a structured [`Outcome`].
-    pub async fn get(
+    /// Perform an HTTP request against `cfg.base + path`, applying the endpoint's
+    /// timeout, auth, cache and retry policy. Only idempotent methods (GET) are cached
+    /// and auto-retried — a non-idempotent mutation is never silently re-sent. Returns a
+    /// structured [`Outcome`].
+    pub async fn request(
         &self,
         cfg: &EndpointConfig,
+        method: &str,
         path: &str,
         query: &[(String, String)],
+        body: Option<&serde_json::Value>,
     ) -> Outcome {
         let url = format!("{}{}", cfg.base.trim_end_matches('/'), path);
         let key = cache_key(&url, query);
+        let idempotent = matches!(method, "GET" | "HEAD");
+        let verb = reqwest::Method::from_bytes(method.as_bytes()).unwrap_or(reqwest::Method::GET);
 
-        if cfg.cache_ttl_ms.is_some() {
+        if idempotent && cfg.cache_ttl_ms.is_some() {
             if let Some(v) = self.cache_get(&key) {
                 self.metrics.cache_hits.fetch_add(1, Ordering::Relaxed);
                 return Outcome::Success(v);
@@ -77,7 +83,10 @@ impl HttpEngine {
         let mut attempt = 0u32;
         loop {
             self.metrics.requests.fetch_add(1, Ordering::Relaxed);
-            let mut req = self.client.get(&url).query(query);
+            let mut req = self.client.request(verb.clone(), &url).query(query);
+            if let Some(b) = body {
+                req = req.json(b);
+            }
             if let Some(ms) = cfg.timeout_ms {
                 req = req.timeout(Duration::from_millis(ms));
             }
@@ -89,12 +98,14 @@ impl HttpEngine {
                     let body = resp.text().await.unwrap_or_default();
                     if (200..300).contains(&status) {
                         let value = parse_body(&body);
-                        if let Some(ttl) = cfg.cache_ttl_ms {
-                            self.cache_put(key.clone(), value.clone(), ttl);
+                        if idempotent {
+                            if let Some(ttl) = cfg.cache_ttl_ms {
+                                self.cache_put(key.clone(), value.clone(), ttl);
+                            }
                         }
                         return Outcome::Success(value);
                     }
-                    if is_retryable(status) && attempt < cfg.retries {
+                    if idempotent && is_retryable(status) && attempt < cfg.retries {
                         attempt += 1;
                         self.metrics.retries.fetch_add(1, Ordering::Relaxed);
                         tokio::time::sleep(backoff_delay(cfg.backoff, attempt)).await;
@@ -112,7 +123,7 @@ impl HttpEngine {
                     return Outcome::Failure(err);
                 }
                 Err(e) => {
-                    if attempt < cfg.retries {
+                    if idempotent && attempt < cfg.retries {
                         attempt += 1;
                         self.metrics.retries.fetch_add(1, Ordering::Relaxed);
                         tokio::time::sleep(backoff_delay(cfg.backoff, attempt)).await;

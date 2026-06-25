@@ -141,6 +141,27 @@ fn duplicate_requests_hit_the_network_once() {
 }
 
 #[test]
+fn mutations_are_always_sent_never_deduped_or_eliminated() {
+    let server = spawn_server(Duration::from_millis(5));
+    // Two identical POSTs (both results unused) + one unused GET.
+    let src = format!(
+        r#"
+        endpoint S {{ base: "{}" }}
+        fetch POST S /orders body {{ item: 1 }}
+        fetch POST S /orders body {{ item: 1 }}
+        fetch S /unused -> g
+        log "done"
+        "#,
+        server.base
+    );
+    let runtime = build(&src);
+    rt().block_on(async { runtime.run().await }).expect("run");
+    // Both POSTs are sent (mutations are never deduplicated or eliminated); the unused
+    // GET is dead-request-eliminated. So exactly 2 requests reach the network.
+    assert_eq!(server.count.load(Ordering::SeqCst), 2);
+}
+
+#[test]
 fn dead_request_is_never_sent() {
     let server = spawn_server(Duration::from_millis(10));
     let src = format!(

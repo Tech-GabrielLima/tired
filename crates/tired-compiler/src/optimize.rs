@@ -58,6 +58,10 @@ fn dedup_requests(body: &mut Body, diags: &mut Diagnostics) {
 
     for node in &body.nodes {
         if let NodeKind::Fetch(f) = &node.kind {
+            // Only GET is safe to deduplicate — a mutation must always be sent.
+            if f.method != "GET" {
+                continue;
+            }
             let sig = fetch_sig(f, &node.reads, &node.deps);
             match seen.get(&sig) {
                 Some((first_id, first_bind)) => {

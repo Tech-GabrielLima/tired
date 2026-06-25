@@ -72,7 +72,7 @@ impl RecordMode {
 }
 
 /// Canonical key for a request: `METHOD endpoint/path?sortedquery`.
-pub fn request_key(endpoint: &str, path: &str, query: &[(String, String)]) -> String {
+pub fn request_key(method: &str, endpoint: &str, path: &str, query: &[(String, String)]) -> String {
     let mut q = query.to_vec();
     q.sort();
     let qs = if q.is_empty() {
@@ -81,7 +81,7 @@ pub fn request_key(endpoint: &str, path: &str, query: &[(String, String)]) -> St
         let parts: Vec<String> = q.iter().map(|(k, v)| format!("{k}={v}")).collect();
         format!("?{}", parts.join("&"))
     };
-    format!("GET {endpoint}{path}{qs}")
+    format!("{method} {endpoint}{path}{qs}")
 }
 
 fn outcome_to_json(o: &Outcome) -> Json {
@@ -157,7 +157,7 @@ mod tests {
 
     #[test]
     fn round_trips_outcomes() {
-        let key = request_key("GitHub", "/users/x", &[("a".into(), "1".into())]);
+        let key = request_key("GET", "GitHub", "/users/x", &[("a".into(), "1".into())]);
         assert_eq!(key, "GET GitHub/users/x?a=1");
 
         let rec = RecordMode::record();
