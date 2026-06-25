@@ -157,6 +157,15 @@ Three pieces of tooling reuse the core rather than re-implementing it.
 - **JSON Schema export (`schema.rs`, `tired schema`).** Emits a JSON Schema (2020-12) for the declared
   `type`/`contract`s — field types map to JSON Schema types (with `format`s for `Url`/`Email`/…) and
   `where` constraints become `minimum`/`maxLength`/… keywords.
+- **`server` mode (`server.rs`, `tired serve`).** Closes the loop: a `server { route ... }` is served by a
+  hand-rolled tokio HTTP/1.1 server. Each request binds its path params (plus `query`/`body`) and runs the
+  route's handler **through the same executor** — so a fan-out aggregation in a handler is parallelized and
+  deduplicated for free. An API gateway whose concurrency the compiler writes.
+- **Static request-cost analysis (`cost.rs`).** Walking the optimized IR, it bounds the number of network
+  requests any path through a flow/route can issue and how many run in parallel (a `match` takes the *max*
+  over arms; a flow call adds that flow's cost; recursion is broken). Surfaced by `tired explain`.
+- **Python bindings (`tired-py`, PyO3 abi3).** The compiler + runtime exposed to Python (`check`, `run`,
+  `inspect`, `json_schema`, `explain`) as a single `abi3` wheel that works on CPython 3.8+.
 
 ### Mutation safety
 
@@ -176,9 +185,8 @@ These keep the implementation honest and focused on the language ideas:
   `Unknown`, so field and exhaustiveness checks don't apply to it. Opting into `Result<...>` is how you opt
   into checked error handling. (`tired inspect` generates types offline from a sample, but the type checker
   itself does not infer response shapes from the network.)
-- **No `server` mode.** TIRED is a *client* language; the spec's `server` side (defining routes, generating
-  OpenAPI/SDKs) and OpenAPI/GraphQL schema *import* are not built. (All HTTP verbs *are* supported for
-  consuming APIs.)
+- **`server` mode is for aggregation, not codegen.** Routes are served and their handlers consume APIs,
+  but generating OpenAPI/SDKs from a server, and importing OpenAPI/GraphQL schemas, are not built.
 - **Pipelines build a per-element scope by cloning.** Fine for typical API payloads; a huge array with a
   large environment would want a cheaper scope representation.
 - **Expression-position `match` is synchronous.** A `match` used as a value (`let x = match …`) cannot do

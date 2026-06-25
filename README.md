@@ -125,6 +125,33 @@ The pipeline itself is rich, too: `filter` · `map`/`pluck` · `sort` · `limit`
 
 ---
 
+### 5 · It serves, too — `consume ↔ serve`
+
+A `server { route GET /dashboard/{u} -> { … } }` turns TIRED into an API gateway / BFF.
+Each route handler is ordinary TIRED code, so the **same optimizer parallelizes and
+deduplicates its upstream calls** — you write a straight-line aggregation and get the
+fastest safe gateway for free:
+
+```text
+$ tired explain examples/gateway.tired
+server Gateway:
+  route GET /dashboard/{..}:  [≤ 3 requests, up to 3 in parallel]
+    wave 1:  ‖ 3 requests in parallel
+      • fetch GitHub /users/{..} -> profile
+      • fetch GitHub /users/{..}/repos -> top
+      • fetch GitHub /users/{..}/followers -> followers
+```
+
+### 6 · It tells you the request cost — *before you ship*
+
+That `[≤ 3 requests, up to 3 in parallel]` is **static request-cost analysis**: walking the
+IR, the compiler bounds how many network calls any path through a route/flow can issue
+(a `match` counts the max over its arms, a flow call adds that flow's cost). No HTTP
+client tells you the blast radius of an endpoint at compile time — TIRED reads it off the
+optimized IR.
+
+---
+
 ## Why a language — and how it compares
 
 Client libraries are excellent. The bet TIRED makes is that the *recurring, dangerous* parts of calling
@@ -185,27 +212,29 @@ hollow stubs.
 
 | Built and tested ✅ | Designed, not implemented ⏳ |
 |---|---|
-| Lexer, parser, AST, `rustc`-style diagnostics (carets + "did you mean") | Python / Java FFI bindings (PyO3 / JNI over a C ABI) |
+| Lexer, parser, AST, `rustc`-style diagnostics (carets + "did you mean") | Java (JNI) bindings |
 | Type system + checker: exhaustive `Result` handling, field typing, resolution | IntelliJ plugin (the VS Code extension is built) |
 | IR + optimizer: **dead-request elimination**, **parallel inference**, **request deduplication** | WASM / native (LLVM) codegen, adaptive JIT |
-| Concurrent runtime: wave scheduler, HTTP/2 via `reqwest`, retry/backoff, timeout, bearer auth, TTL cache, Prometheus-style counters | Distributed cluster mode, TiredHub registry |
-| **Full HTTP verbs** (GET/POST/PUT/PATCH/DELETE) + JSON request bodies; mutations are never reordered, deduped or auto-retried | Redis-backed distributed cache |
-| In-language **mock engine** + `test` blocks (offline, deterministic) | OpenAPI / GraphQL schema *import*, `server` mode |
-| Runtime **contract** verification (`where` constraints) | |
-| **Language server** (`tired lsp`) + a **VS Code extension** (syntax + live diagnostics) | |
-| **Time-travel** record & replay (`--record` / `tired replay`) | |
-| **Schema inference** (`tired inspect`) + **JSON Schema export** (`tired schema`) | |
-| CLI: `run`, `check`, `test`, `explain`, `fmt`, `inspect`, `schema`, `replay`, `lsp` | |
+| **Static request-cost analysis** (max requests & parallelism per route/flow) | Distributed cluster mode, TiredHub registry |
+| Concurrent runtime: wave scheduler, HTTP/2, retry/backoff, timeout, bearer auth, TTL cache, metrics | Redis-backed distributed cache |
+| **Full HTTP verbs** (GET/POST/PUT/PATCH/DELETE) + JSON bodies; mutations never reordered/deduped/auto-retried | OpenAPI / GraphQL schema *import* |
+| **`server` mode** — serve HTTP routes whose handlers consume APIs (auto-parallelized) | |
+| In-language **mock engine** + `test` blocks; runtime **contract** verification | |
+| **Language server** (`tired lsp`) + **VS Code extension**; **Python bindings** (PyO3, pip) | |
+| **Time-travel** record & replay; **schema inference** + **JSON Schema export** | |
+| CLI: `run`, `check`, `test`, `explain`, `fmt`, `inspect`, `schema`, `serve`, `replay`, `lsp` | |
 
 ---
 
 ## Measured here
 
-`cargo test --workspace` → **47 tests + 1 doc-test, 0 failures** across the five crates: lexer/parser,
+`cargo test --workspace` → **51 tests + 1 doc-test, 0 failures** across six crates: lexer/parser,
 type-checker (every flagship rule has both an accept and a reject test), optimizer (parallelism,
-dead-request elimination & deduplication), end-to-end runtime tests against an in-process HTTP server
-(request-count checks that prove dedup *and* that mutations are always sent), schema inference + JSON
-Schema export, record/replay round-trips, and the language server (diagnostics/completion/hover).
+dead-request elimination, deduplication & request-cost), end-to-end runtime tests against an in-process
+HTTP server — including an **end-to-end `server`-mode test** that starts a TIRED gateway and asserts it
+aggregates two upstreams in parallel — schema inference + JSON Schema export, record/replay round-trips,
+and the language server. The Python bindings (PyO3) build into an `abi3` module and are exercised from
+Python.
 
 ### Parallel-inference benchmark
 
@@ -247,9 +276,11 @@ $ cargo test -p tired-runtime --test integration benchmark -- --nocapture
       ├── Mock engine: offline, deterministic routing for `test`
       └── Contract verifier: runtime `where`-constraint checks
       ├── Record/replay: capture outcomes (`--record`) and serve them back (`replay`)
+      └── HTTP server (`serve`): route handlers run through the same optimizer
       └────────────────────────────────────────────────────────────────────────────────────┘
             ▲ tired-lsp — language server (reuses the compiler): diagnostics · completion · hover
-            ▲ tired-cli — the `tired` binary: run · check · test · explain · fmt · inspect · replay · lsp
+            ▲ tired-py  — Python bindings (PyO3, abi3): check · run · inspect · schema
+            ▲ tired-cli — `tired`: run · check · test · explain · fmt · inspect · schema · serve · replay · lsp
 ```
 
 The split is deliberate: **the entire compiler front-end is dependency-free, std-only Rust.** Only the
@@ -260,11 +291,13 @@ reuses the compiler and only adds `serde_json`).
 tired/
 ├── crates/
 │   ├── tired-syntax/    lexer, parser, AST, diagnostics, pretty-printer  (no deps)
-│   ├── tired-compiler/  types, checker, IR, optimizer                    (no deps)
-│   ├── tired-runtime/   value model, eval, mock + HTTP engines, executor, contracts,
-│   │                    schema inference (`inspect`), record/replay
+│   ├── tired-compiler/  types, checker, IR, optimizer, request-cost      (no deps)
+│   ├── tired-runtime/   eval, mock + HTTP engines, wave executor, contracts,
+│   │                    schema inference, record/replay, HTTP server
 │   ├── tired-lsp/       LSP server over stdio (diagnostics, completion, hover)
+│   ├── tired-py/        Python bindings (PyO3 / maturin)
 │   └── tired-cli/       the `tired` command-line driver
+├── editors/vscode/      VS Code extension (grammar + LSP client)
 ├── examples/            runnable .tired programs (live + offline)
 └── docs/                DESIGN.md and the formal grammar (grammar.ebnf)
 ```
@@ -295,8 +328,19 @@ tired inspect https://api.github.com/users/octocat User
 tired run    examples/parallel.tired --record session.json
 tired replay session.json examples/parallel.tired
 
+# server mode — TIRED as an API gateway (handlers auto-parallelize their upstreams):
+tired explain examples/gateway.tired     # plan + request cost, no network
+tired serve   examples/gateway.tired     # serve it on http://127.0.0.1:8088/api/...
+
 # Language server (point your editor's LSP client at this):
 tired lsp
+```
+
+From **Python** (PyO3 bindings):
+
+```bash
+pip install maturin && (cd crates/tired-py && maturin develop)
+python -c "import tired; print(tired.inspect('{\"id\":1}', 'User'))"
 ```
 
 Run the test suite and the benchmark:

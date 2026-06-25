@@ -154,27 +154,28 @@ prefiro dizer isso a entregar stubs vazios.
 
 | Construído e testado ✅ | Projetado, não implementado ⏳ |
 |---|---|
-| Lexer, parser, AST, diagnósticos estilo `rustc` (carets + "did you mean") | Bindings Python / Java (PyO3 / JNI sobre um C ABI) |
+| Lexer, parser, AST, diagnósticos estilo `rustc` (carets + "did you mean") | Bindings Java (JNI) |
 | Type system + checker: `Result` exaustivo, tipagem de campos, resolução | Plugin IntelliJ (a extensão VS Code já está pronta) |
-| IR + otimizador: **eliminação de requisições mortas**, **inferência de paralelismo**, **deduplicação de requisições** | Codegen WASM / nativo (LLVM), JIT adaptativo |
-| Runtime concorrente: escalonador de ondas, HTTP/2 via `reqwest`, retry/backoff, timeout, auth bearer, cache TTL, contadores estilo Prometheus | Modo cluster distribuído, registry TiredHub |
-| **Verbos HTTP completos** (GET/POST/PUT/PATCH/DELETE) + body JSON; mutações nunca são reordenadas, dedupadas ou re-tentadas sozinhas | Cache distribuído via Redis |
-| **Mock engine** na própria linguagem + blocos `test` (offline, determinísticos) | Import de schema OpenAPI / GraphQL, modo `server` |
-| Verificação de **contratos** em runtime (restrições `where`) | |
-| **Language server** (`tired lsp`) + **extensão VS Code** (syntax + diagnostics ao vivo) | |
-| **Time-travel** record & replay (`--record` / `tired replay`) | |
-| **Inferência de schema** (`tired inspect`) + **export JSON Schema** (`tired schema`) | |
-| CLI: `run`, `check`, `test`, `explain`, `fmt`, `inspect`, `schema`, `replay`, `lsp` | |
+| IR + otimizador: **eliminação de requisições mortas**, **inferência de paralelismo**, **deduplicação** | Codegen WASM / nativo (LLVM), JIT adaptativo |
+| **Análise estática de custo de requisições** (máx. de chamadas e paralelismo por rota/flow) | Modo cluster distribuído, registry TiredHub |
+| Runtime concorrente: escalonador de ondas, HTTP/2, retry/backoff, timeout, auth bearer, cache TTL, métricas | Cache distribuído via Redis |
+| **Verbos HTTP completos** (GET/POST/PUT/PATCH/DELETE) + body JSON; mutações nunca reordenadas/dedupadas/re-tentadas | Import de schema OpenAPI / GraphQL |
+| **Modo `server`** — serve rotas HTTP cujos handlers consomem APIs (auto-paralelizados) | |
+| **Mock engine** + blocos `test`; verificação de **contratos** em runtime | |
+| **Language server** + **extensão VS Code**; **bindings Python** (PyO3, pip) | |
+| **Time-travel** record & replay; **inferência de schema** + **export JSON Schema** | |
+| CLI: `run`, `check`, `test`, `explain`, `fmt`, `inspect`, `schema`, `serve`, `replay`, `lsp` | |
 
 ---
 
 ## Medido aqui
 
-`cargo test --workspace` → **47 testes + 1 doc-test, 0 falhas** nas cinco crates: lexer/parser, type
-checker (cada regra-bandeira tem teste de aceitação e de rejeição), otimizador (paralelismo, eliminação
-e deduplicação de requisições), testes end-to-end de runtime contra um servidor HTTP in-process (com
-checagens de contagem que provam o dedup *e* que mutações sempre são enviadas), inferência + export de
-JSON Schema, round-trip de record/replay e o language server (diagnostics/autocomplete/hover).
+`cargo test --workspace` → **51 testes + 1 doc-test, 0 falhas** em seis crates: lexer/parser, type
+checker, otimizador (paralelismo, eliminação, deduplicação e custo de requisições), testes end-to-end de
+runtime contra um servidor HTTP in-process — incluindo um **teste end-to-end do modo `server`** que sobe
+um gateway TIRED e verifica que ele agrega dois upstreams em paralelo —, inferência + export de JSON
+Schema, round-trip de record/replay e o language server. Os bindings Python (PyO3) compilam num módulo
+`abi3` e são exercitados a partir do Python.
 
 ### Benchmark de inferência de paralelismo
 
@@ -231,10 +232,12 @@ tired/
 ├── crates/
 │   ├── tired-syntax/    lexer, parser, AST, diagnósticos, pretty-printer  (sem deps)
 │   ├── tired-compiler/  tipos, checker, IR, otimizador                    (sem deps)
-│   ├── tired-runtime/   modelo de valores, eval, motores mock + HTTP, executor, contratos,
-│   │                    inferência de schema (`inspect`), record/replay
+│   ├── tired-runtime/   eval, motores mock + HTTP, executor, contratos,
+│   │                    inferência de schema, record/replay, servidor HTTP
 │   ├── tired-lsp/       language server via stdio (diagnostics, autocomplete, hover)
+│   ├── tired-py/        bindings Python (PyO3 / maturin)
 │   └── tired-cli/       o driver de linha de comando `tired`
+├── editors/vscode/      extensão VS Code (grammar + cliente LSP)
 ├── examples/            programas .tired executáveis (live + offline)
 └── docs/                DESIGN.md e a gramática formal (grammar.ebnf)
 ```
@@ -265,9 +268,16 @@ tired inspect https://api.github.com/users/octocat User
 tired run    examples/parallel.tired --record session.json
 tired replay session.json examples/parallel.tired
 
+# modo server — TIRED como API gateway (handlers paralelizam os upstreams sozinhos):
+tired explain examples/gateway.tired     # plano + custo de requisições, sem rede
+tired serve   examples/gateway.tired     # serve em http://127.0.0.1:8088/api/...
+
 # Language server (aponte o cliente LSP do seu editor pra cá):
 tired lsp
 ```
+
+Do **Python** (bindings PyO3): `pip install maturin && (cd crates/tired-py && maturin develop)`,
+depois `import tired`.
 
 Rodar a suíte de testes e o benchmark:
 

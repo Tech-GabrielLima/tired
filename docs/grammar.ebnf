@@ -4,7 +4,7 @@
    ============================================================================ *)
 
 program        = { item } ;
-item           = endpoint | type_decl | flow | mock | test | statement ;
+item           = endpoint | type_decl | flow | mock | test | server | statement ;
 
 (* ---- declarations ---- *)
 
@@ -22,6 +22,9 @@ mock           = "mock" ident "{" { mock_route } "}" ;
 mock_route     = ident path "->" expr ;              (* ident = HTTP method: GET, POST, ... *)
 
 test           = "test" string block ;
+
+server         = "server" ident "{" { setting | route } "}" ;
+route          = "route" ident path "->" ( block | expr ) ;   (* ident = method *)
 
 (* ---- types ---- *)
 

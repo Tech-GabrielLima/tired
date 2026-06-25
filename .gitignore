@@ -2,3 +2,6 @@
 **/target
 *.tiredc
 session.tiredrc
+__pycache__/
+*.pyc
+*.so
