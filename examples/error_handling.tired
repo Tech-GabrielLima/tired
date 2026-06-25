@@ -1,0 +1,38 @@
+// Network-dependent error handling, fully offline via mocks.
+// `tired test examples/error_handling.tired`
+
+endpoint Stripe {
+  base: "https://api.stripe.com/v1"
+  auth: Bearer($STRIPE_KEY)
+}
+
+mock Stripe {
+  // The specific route must precede the parameterized one.
+  GET /charges/missing -> NotFound
+  GET /charges/{id}     -> { id: $id, amount: 4200, currency: "usd" }
+}
+
+flow GetCharge(id: String) -> Charge {
+  fetch Stripe /charges/{id} -> result: Result<Charge, ApiError>
+
+  // The compiler requires every case to be handled — Ok, the known errors, and a
+  // catch-all for the open error domain.
+  match result {
+    Ok(charge)         => charge
+    Err(NotFound)      => fallback()
+    Err(RateLimit(ms)) => wait(ms) then retry
+    Err(e)             => fallback()
+  }
+}
+
+test "a present charge returns its body" {
+  using mock Stripe
+  GetCharge("ch_123") -> c
+  assert c.amount == 4200
+}
+
+test "a missing charge falls back to null" {
+  using mock Stripe
+  GetCharge("missing") -> c
+  assert c == null
+}

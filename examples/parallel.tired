@@ -1,0 +1,15 @@
+// Three independent requests, written sequentially. The optimizer notices there are no
+// dependencies between them and collapses all three into one parallel wave — run
+// `tired explain examples/parallel.tired` to see it, and `tired run --show-plan` to
+// execute them concurrently (wall-clock ~ the slowest one, not the sum).
+
+endpoint GitHub {
+  base: "https://api.github.com"
+  timeout: 8s
+}
+
+fetch GitHub /users/torvalds   -> a
+fetch GitHub /users/octocat    -> b
+fetch GitHub /users/gvanrossum -> c
+
+log "fetched: {a.login}, {b.login}, {c.login}"
