@@ -119,6 +119,32 @@ O pipeline também é rico: `filter` · `map`/`pluck` · `sort` · `limit`/`take
 
 ---
 
+## Por que uma linguagem — e como ela se compara
+
+Bibliotecas de cliente são ótimas. A aposta do TIRED é que as partes *recorrentes e perigosas* de
+consumir uma API — paralelismo, tratamento de erro, retries, validação, testes — não deveriam ser
+redigitadas à mão em todo projeto. Elas deveriam ser **propriedades que o compilador verifica e o
+otimizador explora**.
+
+| | `requests`/`httpx` (Py) | `fetch`/`axios` (JS) | Feign/RestTemplate (Java) | **TIRED** |
+|---|:---:|:---:|:---:|:---:|
+| Chamadas independentes em paralelo **automaticamente** | ✗ (`gather` manual) | ✗ (`Promise.all` manual) | ✗ | **✓** |
+| **Não compila** se você ignorar um erro possível | ✗ | ✗ | ✗ | **✓** |
+| Requisições idênticas **dedupadas**; não usadas **removidas** | ✗ | ✗ | ✗ | **✓** |
+| Retry / backoff / timeout / cache como **config declarativa** | manual | manual | anotações | **✓** |
+| **Mocks** na linguagem + testes (offline, determinísticos) | libs à parte | libs à parte | parcial | **✓** |
+| **Record/replay** para execução offline determinística | ✗ | ✗ | ✗ | **✓** |
+| Validação de **contrato** das respostas em runtime | ✗ | ✗ | ✗ | **✓** |
+| **Inferência** de schema + export **JSON Schema** | ✗ | ✗ | ✗ | **✓** |
+| Um toolchain: type-check, `fmt`, LSP, plano de execução | n/a | n/a | n/a | **✓** |
+
+**Por que usar:** o compilador se recusa a deixar um erro sem tratamento, o otimizador transforma seu
+código sequencial no schedule seguro mais rápido (paralelo onde é independente, dedupado, chamadas mortas
+removidas), e um único toolchain te dá formatação, language server, checagem de contratos, mocks e
+record/replay — em vez de cinco bibliotecas coladas.
+
+---
+
 ## O que foi construído vs. o que foi projetado
 
 Este repositório é o **núcleo funcional** da linguagem — ele compila, faz type-check, otimiza e executa
@@ -129,25 +155,26 @@ prefiro dizer isso a entregar stubs vazios.
 | Construído e testado ✅ | Projetado, não implementado ⏳ |
 |---|---|
 | Lexer, parser, AST, diagnósticos estilo `rustc` (carets + "did you mean") | Bindings Python / Java (PyO3 / JNI sobre um C ABI) |
-| Type system + checker: `Result` exaustivo, tipagem de campos, resolução | Empacotamento das extensões VS Code / IntelliJ (o language server abaixo já as alimenta) |
+| Type system + checker: `Result` exaustivo, tipagem de campos, resolução | Plugin IntelliJ (a extensão VS Code já está pronta) |
 | IR + otimizador: **eliminação de requisições mortas**, **inferência de paralelismo**, **deduplicação de requisições** | Codegen WASM / nativo (LLVM), JIT adaptativo |
 | Runtime concorrente: escalonador de ondas, HTTP/2 via `reqwest`, retry/backoff, timeout, auth bearer, cache TTL, contadores estilo Prometheus | Modo cluster distribuído, registry TiredHub |
-| **Mock engine** na própria linguagem + blocos `test` (offline, determinísticos) | Cache distribuído via Redis |
-| Verificação de **contratos** em runtime (restrições `where`) | Import de schema OpenAPI / GraphQL, modo `server` |
-| **Language server** (`tired lsp`): diagnostics ao vivo, autocomplete, hover | |
+| **Verbos HTTP completos** (GET/POST/PUT/PATCH/DELETE) + body JSON; mutações nunca são reordenadas, dedupadas ou re-tentadas sozinhas | Cache distribuído via Redis |
+| **Mock engine** na própria linguagem + blocos `test` (offline, determinísticos) | Import de schema OpenAPI / GraphQL, modo `server` |
+| Verificação de **contratos** em runtime (restrições `where`) | |
+| **Language server** (`tired lsp`) + **extensão VS Code** (syntax + diagnostics ao vivo) | |
 | **Time-travel** record & replay (`--record` / `tired replay`) | |
-| **Inferência de schema** (`tired inspect` → `type`/`contract` tipados) | |
-| CLI: `run`, `check`, `test`, `explain`, `fmt`, `inspect`, `replay`, `lsp` | |
+| **Inferência de schema** (`tired inspect`) + **export JSON Schema** (`tired schema`) | |
+| CLI: `run`, `check`, `test`, `explain`, `fmt`, `inspect`, `schema`, `replay`, `lsp` | |
 
 ---
 
 ## Medido aqui
 
-`cargo test --workspace` → **45 testes + 1 doc-test, 0 falhas** nas cinco crates: lexer/parser, type
+`cargo test --workspace` → **47 testes + 1 doc-test, 0 falhas** nas cinco crates: lexer/parser, type
 checker (cada regra-bandeira tem teste de aceitação e de rejeição), otimizador (paralelismo, eliminação
-e deduplicação de requisições), testes end-to-end de runtime contra um servidor HTTP in-process (com uma
-checagem de contagem de requisições que prova o dedup), inferência de schema, round-trip de record/replay
-e o language server (diagnostics/autocomplete/hover).
+e deduplicação de requisições), testes end-to-end de runtime contra um servidor HTTP in-process (com
+checagens de contagem que provam o dedup *e* que mutações sempre são enviadas), inferência + export de
+JSON Schema, round-trip de record/replay e o language server (diagnostics/autocomplete/hover).
 
 ### Benchmark de inferência de paralelismo
 

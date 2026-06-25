@@ -40,10 +40,12 @@ statement      = fetch
                | "using" "mock" ident
                | expr [ "->" binding ] ;
 
-fetch          = "fetch" ident path
+fetch          = "fetch" [ method ] ident path
+                 [ "body" expr ]
                  [ "params" "{" { name ":" expr [ "," ] } "}" ]
                  { "|" pipeline_op }
                  [ "->" binding ] ;
+method         = "GET" | "POST" | "PUT" | "PATCH" | "DELETE" | "HEAD" | "OPTIONS" ;
 binding        = ident [ ":" type ] ;
 
 path           = "/" path_seg { "/" path_seg } ;

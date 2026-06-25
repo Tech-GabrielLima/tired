@@ -152,7 +152,19 @@ Three pieces of tooling reuse the core rather than re-implementing it.
 - **Language server (`tired-lsp`, `tired lsp`).** A stdio LSP that runs `tired_compiler::analyze` on every
   edit and publishes the same diagnostics the CLI prints (byte spans mapped to UTF-16 LSP ranges), plus
   keyword/endpoint **completion** and **hover**. The message handler is pure and unit-tested; the loop only
-  adds Content-Length framing. It depends only on the compiler + `serde_json`.
+  adds Content-Length framing. It depends only on the compiler + `serde_json`. A thin **VS Code extension**
+  (`editors/vscode`) packages it together with a TextMate grammar.
+- **JSON Schema export (`schema.rs`, `tired schema`).** Emits a JSON Schema (2020-12) for the declared
+  `type`/`contract`s — field types map to JSON Schema types (with `format`s for `Url`/`Email`/…) and
+  `where` constraints become `minimum`/`maxLength`/… keywords.
+
+### Mutation safety
+
+Adding non-GET verbs forced a correctness decision the optimizer now encodes: a **mutation is an effect**.
+A non-GET fetch is marked as an effect node, which means it is never reordered, never deduplicated, never
+eliminated when its result is unused, and never auto-retried on failure (the request may already have been
+received). GETs remain freely parallelizable, cacheable, dedupable and retryable. The compiler knows the
+difference between a safe read and a side effect.
 
 ---
 
@@ -164,8 +176,9 @@ These keep the implementation honest and focused on the language ideas:
   `Unknown`, so field and exhaustiveness checks don't apply to it. Opting into `Result<...>` is how you opt
   into checked error handling. (`tired inspect` generates types offline from a sample, but the type checker
   itself does not infer response shapes from the network.)
-- **`fetch` is GET.** The client surface models read APIs; the `server` side of the original spec
-  (defining routes, generating OpenAPI/SDKs) and OpenAPI/GraphQL schema *import* are not built.
+- **No `server` mode.** TIRED is a *client* language; the spec's `server` side (defining routes, generating
+  OpenAPI/SDKs) and OpenAPI/GraphQL schema *import* are not built. (All HTTP verbs *are* supported for
+  consuming APIs.)
 - **Pipelines build a per-element scope by cloning.** Fine for typical API payloads; a huge array with a
   large environment would want a cheaper scope representation.
 - **Expression-position `match` is synchronous.** A `match` used as a value (`let x = match …`) cannot do

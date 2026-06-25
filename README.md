@@ -125,6 +125,57 @@ The pipeline itself is rich, too: `filter` · `map`/`pluck` · `sort` · `limit`
 
 ---
 
+## Why a language — and how it compares
+
+Client libraries are excellent. The bet TIRED makes is that the *recurring, dangerous* parts of calling
+an API — parallelism, error handling, retries, validation, testing — shouldn't be re-typed by hand in
+every codebase. They should be **properties the compiler checks and the optimizer exploits**.
+
+| | `requests`/`httpx` (Py) | `fetch`/`axios` (JS) | Feign/RestTemplate (Java) | **TIRED** |
+|---|:---:|:---:|:---:|:---:|
+| Independent calls run in parallel **automatically** | ✗ (manual `gather`) | ✗ (manual `Promise.all`) | ✗ | **✓** |
+| **Won't compile** if you ignore a possible error | ✗ | ✗ | ✗ | **✓** |
+| Identical requests **deduplicated**; unused ones **dropped** | ✗ | ✗ | ✗ | **✓** |
+| Retry / backoff / timeout / cache as **declarative config** | manual | manual | annotations | **✓** |
+| In-language **mocks** + tests (offline, deterministic) | separate libs | separate libs | partial | **✓** |
+| **Record/replay** for deterministic offline runs | ✗ | ✗ | ✗ | **✓** |
+| **Contract** validation of responses at runtime | ✗ | ✗ | ✗ | **✓** |
+| Schema **inference** + **JSON Schema** export | ✗ | ✗ | ✗ | **✓** |
+| One toolchain: type-check, `fmt`, LSP, explain-plan | n/a | n/a | n/a | **✓** |
+
+Same task — fetch a user, fan out to two more calls, handle a 404 — in Python vs TIRED:
+
+```python
+# Python (httpx + asyncio): you wire the concurrency and remember to check the status.
+async def dashboard(user):
+    async with httpx.AsyncClient() as c:
+        r = await c.get(f".../users/{user}")
+        if r.status_code == 404:        # easy to forget; nothing forces it
+            return None
+        repos, followers = await asyncio.gather(    # manual parallelism
+            c.get(f".../users/{user}/repos"),
+            c.get(f".../users/{user}/followers"),
+        )
+        return build(r.json(), repos.json(), followers.json())
+```
+
+```tired
+# TIRED: the 404 is a compile error if unhandled; the fan-out parallelizes itself.
+flow Dashboard(user: String) -> User {
+  fetch GitHub /users/{user}          -> u: Result<User, NotFound>
+  fetch GitHub /users/{user}/repos     -> repos      # these two are independent,
+  fetch GitHub /users/{user}/followers -> followers  # so they run concurrently
+  match u { Ok(profile) => profile  Err(NotFound) => default_user() }
+}
+```
+
+**Why use it:** the compiler refuses to let an error go unhandled, the optimizer turns your sequential
+code into the fastest safe schedule (parallel where independent, deduped, dead calls removed), and one
+toolchain gives you formatting, a language server, contract checks, mocks and record/replay — instead of
+five libraries glued together.
+
+---
+
 ## What's built vs. what's designed
 
 This repository is the **working core** of the language — it compiles, type-checks, optimizes, and runs
@@ -135,25 +186,26 @@ hollow stubs.
 | Built and tested ✅ | Designed, not implemented ⏳ |
 |---|---|
 | Lexer, parser, AST, `rustc`-style diagnostics (carets + "did you mean") | Python / Java FFI bindings (PyO3 / JNI over a C ABI) |
-| Type system + checker: exhaustive `Result` handling, field typing, resolution | VS Code / IntelliJ extension packaging (the LSP server below already powers them) |
+| Type system + checker: exhaustive `Result` handling, field typing, resolution | IntelliJ plugin (the VS Code extension is built) |
 | IR + optimizer: **dead-request elimination**, **parallel inference**, **request deduplication** | WASM / native (LLVM) codegen, adaptive JIT |
 | Concurrent runtime: wave scheduler, HTTP/2 via `reqwest`, retry/backoff, timeout, bearer auth, TTL cache, Prometheus-style counters | Distributed cluster mode, TiredHub registry |
-| In-language **mock engine** + `test` blocks (offline, deterministic) | Redis-backed distributed cache |
-| Runtime **contract** verification (`where` constraints) | OpenAPI / GraphQL schema *import*, `server` mode |
-| **Language server** (`tired lsp`): live diagnostics, completion, hover | |
+| **Full HTTP verbs** (GET/POST/PUT/PATCH/DELETE) + JSON request bodies; mutations are never reordered, deduped or auto-retried | Redis-backed distributed cache |
+| In-language **mock engine** + `test` blocks (offline, deterministic) | OpenAPI / GraphQL schema *import*, `server` mode |
+| Runtime **contract** verification (`where` constraints) | |
+| **Language server** (`tired lsp`) + a **VS Code extension** (syntax + live diagnostics) | |
 | **Time-travel** record & replay (`--record` / `tired replay`) | |
-| **Schema inference** (`tired inspect` → typed `type`/`contract`) | |
-| CLI: `run`, `check`, `test`, `explain`, `fmt`, `inspect`, `replay`, `lsp` | |
+| **Schema inference** (`tired inspect`) + **JSON Schema export** (`tired schema`) | |
+| CLI: `run`, `check`, `test`, `explain`, `fmt`, `inspect`, `schema`, `replay`, `lsp` | |
 
 ---
 
 ## Measured here
 
-`cargo test --workspace` → **45 tests + 1 doc-test, 0 failures** across the five crates: lexer/parser,
+`cargo test --workspace` → **47 tests + 1 doc-test, 0 failures** across the five crates: lexer/parser,
 type-checker (every flagship rule has both an accept and a reject test), optimizer (parallelism,
 dead-request elimination & deduplication), end-to-end runtime tests against an in-process HTTP server
-(including a request-count check that proves dedup), schema inference, record/replay round-trips, and the
-language server (diagnostics/completion/hover).
+(request-count checks that prove dedup *and* that mutations are always sent), schema inference + JSON
+Schema export, record/replay round-trips, and the language server (diagnostics/completion/hover).
 
 ### Parallel-inference benchmark
 
