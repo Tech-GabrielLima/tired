@@ -105,6 +105,24 @@ warning: request `GitHub /users/torvalds/repos` is never used and was eliminated
    = note: dead-request elimination: 0 bytes were sent for it
 ```
 
+### 4 · Request deduplication (CSE)
+
+Two `fetch`es that issue the **identical** request (same endpoint, path, params, pipeline *and* the same
+inputs) are collapsed — the later one reuses the first's result, so the same URL is never hit twice.
+It's common-subexpression elimination, for the network. `tired explain` shows the second fetch rewritten
+to a `let`:
+
+```text
+main:
+  wave 1:
+    • fetch GitHub /users/octocat -> a
+  wave 2:
+    • let -> b          # identical request — reuses `a`, 0 extra bytes
+```
+
+The pipeline itself is rich, too: `filter` · `map`/`pluck` · `sort` · `limit`/`take` · `skip` ·
+`reverse` · `unique` · `flatten` · `count` · `sum`.
+
 ---
 
 ## What's built vs. what's designed
@@ -118,7 +136,7 @@ hollow stubs.
 |---|---|
 | Lexer, parser, AST, `rustc`-style diagnostics (carets + "did you mean") | Python / Java FFI bindings (PyO3 / JNI over a C ABI) |
 | Type system + checker: exhaustive `Result` handling, field typing, resolution | VS Code / IntelliJ extension packaging (the LSP server below already powers them) |
-| IR + optimizer: **dead-request elimination**, **parallel inference** | WASM / native (LLVM) codegen, adaptive JIT |
+| IR + optimizer: **dead-request elimination**, **parallel inference**, **request deduplication** | WASM / native (LLVM) codegen, adaptive JIT |
 | Concurrent runtime: wave scheduler, HTTP/2 via `reqwest`, retry/backoff, timeout, bearer auth, TTL cache, Prometheus-style counters | Distributed cluster mode, TiredHub registry |
 | In-language **mock engine** + `test` blocks (offline, deterministic) | Redis-backed distributed cache |
 | Runtime **contract** verification (`where` constraints) | OpenAPI / GraphQL schema *import*, `server` mode |
@@ -131,10 +149,11 @@ hollow stubs.
 
 ## Measured here
 
-`cargo test --workspace` → **41 tests + 1 doc-test, 0 failures** across the five crates: lexer/parser,
-type-checker (every flagship rule has both an accept and a reject test), optimizer (parallelism &
-elimination), end-to-end runtime tests against an in-process HTTP server, schema inference, record/replay
-round-trips, and the language server (diagnostics/completion/hover).
+`cargo test --workspace` → **45 tests + 1 doc-test, 0 failures** across the five crates: lexer/parser,
+type-checker (every flagship rule has both an accept and a reject test), optimizer (parallelism,
+dead-request elimination & deduplication), end-to-end runtime tests against an in-process HTTP server
+(including a request-count check that proves dedup), schema inference, record/replay round-trips, and the
+language server (diagnostics/completion/hover).
 
 ### Parallel-inference benchmark
 

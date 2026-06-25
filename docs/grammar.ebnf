@@ -49,10 +49,13 @@ binding        = ident [ ":" type ] ;
 path           = "/" path_seg { "/" path_seg } ;
 path_seg       = ident | int | "{" expr "}" ;
 
-pipeline_op    = "filter" "(" expr ")"
-               | "map"    "(" expr ")"
-               | "sort"   "(" "by" ":" expr [ "asc" | "desc" ] ")"
-               | "limit"  "(" expr ")" ;
+pipeline_op    = "filter"  "(" expr ")"
+               | "map"     "(" expr ")"
+               | "pluck"   "(" expr ")"                              (* sugar for map *)
+               | "sort"    "(" "by" ":" expr [ "asc" | "desc" ] ")"
+               | ("limit" | "take" | "skip") "(" expr ")"
+               | ("unique" | "sum") "(" [ "by" ":" expr ] ")"
+               | ("reverse" | "flatten" | "count") "(" ")" ;
 
 (* ---- expressions (precedence: or < and < cmp < add < mul < unary < postfix) ---- *)
 

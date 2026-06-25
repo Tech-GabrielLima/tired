@@ -88,8 +88,13 @@ Expressions stay as their AST form — only *statements* become nodes. The key p
 
 ## 6. Optimizer (`tired-compiler/optimize.rs`)
 
-Two passes over every body (recursing into `match` arms):
+Three passes over every body (recursing into `match` arms), in this order:
 
+- **Request deduplication (CSE).** Each fetch gets a *signature* — endpoint + path + params + pipeline
+  (rendered via the pretty-printer, so it is span-insensitive) plus the producers of its inputs (its read
+  set and dependency ids). Two fetches with equal signatures issue the identical request with the
+  identical inputs, so the later one is rewritten into `let b = a` (reusing the first binding). Running
+  before liveness means the rewrite keeps the first fetch alive. The result: the network is hit once.
 - **Dead-request elimination.** Liveness is backward reachability from the observable (effect) nodes.
   Anything unreached is dead; a dead *fetch* is reported (zero bytes will be sent) and excluded from the
   schedule.

@@ -99,6 +99,24 @@ warning: request `GitHub /users/torvalds/repos` is never used and was eliminated
    = note: dead-request elimination: 0 bytes were sent for it
 ```
 
+### 4 · Deduplicação de requisições (CSE)
+
+Dois `fetch`es que disparam a requisição **idêntica** (mesmo endpoint, path, params, pipeline *e* as
+mesmas entradas) são colapsados — o segundo reusa o resultado do primeiro, então a mesma URL nunca é
+chamada duas vezes. É eliminação de subexpressão comum, para a rede. O `tired explain` mostra o segundo
+fetch reescrito como `let`:
+
+```text
+main:
+  wave 1:
+    • fetch GitHub /users/octocat -> a
+  wave 2:
+    • let -> b          # requisição idêntica — reusa `a`, 0 bytes extras
+```
+
+O pipeline também é rico: `filter` · `map`/`pluck` · `sort` · `limit`/`take` · `skip` · `reverse` ·
+`unique` · `flatten` · `count` · `sum`.
+
 ---
 
 ## O que foi construído vs. o que foi projetado
@@ -112,7 +130,7 @@ prefiro dizer isso a entregar stubs vazios.
 |---|---|
 | Lexer, parser, AST, diagnósticos estilo `rustc` (carets + "did you mean") | Bindings Python / Java (PyO3 / JNI sobre um C ABI) |
 | Type system + checker: `Result` exaustivo, tipagem de campos, resolução | Empacotamento das extensões VS Code / IntelliJ (o language server abaixo já as alimenta) |
-| IR + otimizador: **eliminação de requisições mortas**, **inferência de paralelismo** | Codegen WASM / nativo (LLVM), JIT adaptativo |
+| IR + otimizador: **eliminação de requisições mortas**, **inferência de paralelismo**, **deduplicação de requisições** | Codegen WASM / nativo (LLVM), JIT adaptativo |
 | Runtime concorrente: escalonador de ondas, HTTP/2 via `reqwest`, retry/backoff, timeout, auth bearer, cache TTL, contadores estilo Prometheus | Modo cluster distribuído, registry TiredHub |
 | **Mock engine** na própria linguagem + blocos `test` (offline, determinísticos) | Cache distribuído via Redis |
 | Verificação de **contratos** em runtime (restrições `where`) | Import de schema OpenAPI / GraphQL, modo `server` |
@@ -125,10 +143,11 @@ prefiro dizer isso a entregar stubs vazios.
 
 ## Medido aqui
 
-`cargo test --workspace` → **41 testes + 1 doc-test, 0 falhas** nas cinco crates: lexer/parser, type
-checker (cada regra-bandeira tem teste de aceitação e de rejeição), otimizador (paralelismo &
-eliminação), testes end-to-end de runtime contra um servidor HTTP in-process, inferência de schema,
-round-trip de record/replay e o language server (diagnostics/autocomplete/hover).
+`cargo test --workspace` → **45 testes + 1 doc-test, 0 falhas** nas cinco crates: lexer/parser, type
+checker (cada regra-bandeira tem teste de aceitação e de rejeição), otimizador (paralelismo, eliminação
+e deduplicação de requisições), testes end-to-end de runtime contra um servidor HTTP in-process (com uma
+checagem de contagem de requisições que prova o dedup), inferência de schema, round-trip de record/replay
+e o language server (diagnostics/autocomplete/hover).
 
 ### Benchmark de inferência de paralelismo
 
