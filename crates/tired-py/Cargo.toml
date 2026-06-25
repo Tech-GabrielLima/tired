@@ -1,0 +1,22 @@
+[package]
+name = "tired-py"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Python bindings for TIRED — compile-check, run, inspect and JSON-Schema from Python"
+
+[lib]
+name = "tired"
+crate-type = ["cdylib"]
+
+[dependencies]
+tired-syntax.workspace = true
+tired-compiler.workspace = true
+tired-runtime.workspace = true
+tokio = { workspace = true }
+serde_json.workspace = true
+pyo3 = { version = "0.23", features = ["abi3-py38", "extension-module"] }
+
+[lints.clippy]
+all = "warn"

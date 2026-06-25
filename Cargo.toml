@@ -6,6 +6,7 @@ members = [
     "crates/tired-runtime",
     "crates/tired-lsp",
     "crates/tired-cli",
+    "crates/tired-py",
 ]
 
 [workspace.package]
