@@ -247,7 +247,17 @@ impl Shared {
             query.push((k.clone(), eval(e, env, None)?.display()));
         }
 
-        let outcome = if active.contains(&f.endpoint) {
+        let key = crate::record::request_key(&f.endpoint, &path, &query);
+
+        let outcome = if self.record.is_replay() {
+            // Replay: serve the recorded outcome; a missing key is a hard error so the
+            // run stays deterministic and never silently falls back to the network.
+            self.record.lookup(&key).ok_or_else(|| {
+                RunError::new(format!(
+                    "no recorded response for `{key}` — capture it with `--record` first"
+                ))
+            })?
+        } else if active.contains(&f.endpoint) {
             match self.mocks.get(&f.endpoint) {
                 Some(mock) => mock.lookup("GET", &path),
                 None => Outcome::Failure(ErrValue::new(
@@ -261,7 +271,9 @@ impl Shared {
                 .endpoints
                 .get(&f.endpoint)
                 .ok_or_else(|| RunError::new(format!("unknown endpoint `{}`", f.endpoint)))?;
-            self.http.get(cfg, &path, &query).await
+            let out = self.http.get(cfg, &path, &query).await;
+            self.record.store(key, &out); // no-op unless in record mode
+            out
         };
 
         // Contract verification (successes only).

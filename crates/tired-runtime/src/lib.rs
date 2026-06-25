@@ -10,7 +10,9 @@ mod contracts;
 mod eval;
 mod exec;
 mod http;
+pub mod infer;
 mod mock;
+mod record;
 pub mod value;
 
 use std::collections::HashMap;
@@ -24,6 +26,7 @@ use http::{HttpEngine, MetricsSnapshot};
 use mock::MockEngine;
 
 pub use eval::Env;
+pub use record::RecordMode;
 pub use value::{RunError, Value};
 
 /// Shared, immutable-after-construction runtime state. Cloned (via `Arc`) into every
@@ -33,6 +36,23 @@ pub(crate) struct Shared {
     endpoints: HashMap<String, EndpointConfig>,
     mocks: HashMap<String, MockEngine>,
     http: HttpEngine,
+    record: RecordMode,
+}
+
+/// Fetch a JSON document from a URL (used by `tired inspect`). Independent of any
+/// declared endpoint — a plain authenticated-less GET.
+pub async fn fetch_json(url: &str) -> Result<serde_json::Value, String> {
+    let client = reqwest::Client::builder()
+        .user_agent("tired/0.1")
+        .build()
+        .map_err(|e| e.to_string())?;
+    let resp = client.get(url).send().await.map_err(|e| e.to_string())?;
+    let status = resp.status();
+    let text = resp.text().await.map_err(|e| e.to_string())?;
+    if !status.is_success() {
+        return Err(format!("HTTP {}", status.as_u16()));
+    }
+    serde_json::from_str(&text).map_err(|e| format!("invalid JSON: {e}"))
 }
 
 pub struct Runtime {
@@ -57,6 +77,11 @@ impl TestReport {
 
 impl Runtime {
     pub fn new(compiled: Compiled) -> Self {
+        Self::with_mode(compiled, RecordMode::Off)
+    }
+
+    /// Build a runtime with a record/replay mode (see [`RecordMode`]).
+    pub fn with_mode(compiled: Compiled, record: RecordMode) -> Self {
         let mut endpoints = HashMap::new();
         let mut mocks = HashMap::new();
         for item in &compiled.program.items {
@@ -76,7 +101,18 @@ impl Runtime {
                 endpoints,
                 mocks,
                 http: HttpEngine::new(),
+                record,
             }),
+        }
+    }
+
+    /// Write captured requests to `path` (record mode only). Returns the number written.
+    pub fn save_recording(&self, path: &str) -> Result<(), String> {
+        match self.shared.record.to_json_string() {
+            Some(json) => {
+                std::fs::write(path, json).map_err(|e| format!("cannot write `{path}`: {e}"))
+            }
+            None => Err("not in record mode".to_string()),
         }
     }
 
