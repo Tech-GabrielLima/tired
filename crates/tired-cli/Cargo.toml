@@ -14,7 +14,9 @@ path = "src/main.rs"
 tired-syntax.workspace = true
 tired-compiler.workspace = true
 tired-runtime.workspace = true
+tired-lsp.workspace = true
 tokio.workspace = true
+serde_json.workspace = true
 
 [lints.clippy]
 all = "warn"

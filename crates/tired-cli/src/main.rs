@@ -11,7 +11,7 @@
 use std::process::ExitCode;
 
 use tired_compiler::compile;
-use tired_runtime::{Runtime, Value};
+use tired_runtime::{fetch_json, infer, RecordMode, Runtime, Value};
 
 #[tokio::main]
 async fn main() -> ExitCode {
@@ -26,6 +26,12 @@ async fn main() -> ExitCode {
         "fmt" => cmd_fmt(&args[1..]),
         "test" => cmd_test(&args[1..]).await,
         "explain" | "plan" => cmd_explain(&args[1..]),
+        "inspect" => cmd_inspect(&args[1..]).await,
+        "replay" => cmd_replay(&args[1..]).await,
+        "lsp" => {
+            tired_lsp::run();
+            ExitCode::SUCCESS
+        }
         "--version" | "-V" | "version" => {
             println!("tired {}", env!("CARGO_PKG_VERSION"));
             ExitCode::SUCCESS
@@ -47,10 +53,14 @@ fn usage() {
         "TIRED — a compiled DSL for consuming HTTP APIs\n\n\
          usage:\n\
          \x20 tired run     <file> [--flow NAME [arg ...]] [--show-plan] [--metrics]\n\
+         \x20                      [--record <rec.json>] [--replay <rec.json>]\n\
          \x20 tired check   <file>\n\
          \x20 tired fmt     <file> [--write]\n\
          \x20 tired test    <file>\n\
-         \x20 tired explain <file>"
+         \x20 tired explain <file>\n\
+         \x20 tired inspect <url|file.json> [TypeName]   # infer TIRED types from JSON\n\
+         \x20 tired replay  <rec.json> <file>            # re-run offline from a recording\n\
+         \x20 tired lsp                                  # run the language server (stdio)"
     );
 }
 
@@ -83,6 +93,8 @@ async fn cmd_run(args: &[String]) -> ExitCode {
     let show_plan = args.iter().any(|a| a == "--show-plan");
     let metrics = args.iter().any(|a| a == "--metrics");
     let flow = flag_value(args, "--flow");
+    let record_path = flag_value(args, "--record");
+    let replay_path = flag_value(args, "--replay");
 
     let (compiled, diags) = compile(&src, path);
     if report(&diags, &src, path) {
@@ -92,7 +104,18 @@ async fn cmd_run(args: &[String]) -> ExitCode {
         return ExitCode::FAILURE;
     };
 
-    let rt = Runtime::new(compiled);
+    let mode = match &replay_path {
+        Some(p) => match RecordMode::replay_from(p) {
+            Ok(m) => m,
+            Err(e) => {
+                eprintln!("error: {e}");
+                return ExitCode::FAILURE;
+            }
+        },
+        None if record_path.is_some() => RecordMode::record(),
+        None => RecordMode::Off,
+    };
+    let rt = Runtime::with_mode(compiled, mode);
     if show_plan {
         println!("{}", rt.plan());
     }
@@ -117,12 +140,91 @@ async fn cmd_run(args: &[String]) -> ExitCode {
         }
     }
 
+    if let Some(p) = &record_path {
+        match rt.save_recording(p) {
+            Ok(()) => eprintln!("\n[record] saved responses to {p}"),
+            Err(e) => eprintln!("\n[record] {e}"),
+        }
+    }
+
     if metrics {
         let m = rt.metrics();
         eprintln!(
             "\n[metrics] requests={} cache_hits={} retries={} errors={}",
             m.requests, m.cache_hits, m.retries, m.errors
         );
+    }
+    ExitCode::SUCCESS
+}
+
+/// `tired inspect <url|file.json> [TypeName]` — infer TIRED types from a JSON sample.
+async fn cmd_inspect(args: &[String]) -> ExitCode {
+    let Some(target) = args.first() else {
+        eprintln!("error: `tired inspect` needs a URL or a .json file");
+        return ExitCode::FAILURE;
+    };
+    let name = args
+        .get(1)
+        .filter(|a| !a.starts_with("--"))
+        .cloned()
+        .unwrap_or_else(|| "Root".into());
+
+    let json = if target.starts_with("http://") || target.starts_with("https://") {
+        match fetch_json(target).await {
+            Ok(j) => j,
+            Err(e) => {
+                eprintln!("error: fetching `{target}`: {e}");
+                return ExitCode::FAILURE;
+            }
+        }
+    } else {
+        let Some(text) = read(target) else {
+            return ExitCode::FAILURE;
+        };
+        match serde_json::from_str(&text) {
+            Ok(j) => j,
+            Err(e) => {
+                eprintln!("error: `{target}` is not valid JSON: {e}");
+                return ExitCode::FAILURE;
+            }
+        }
+    };
+
+    print!("{}", infer::infer_types(&json, &name));
+    ExitCode::SUCCESS
+}
+
+/// `tired replay <rec.json> <file>` — run a program offline against a recording.
+async fn cmd_replay(args: &[String]) -> ExitCode {
+    let (Some(rec), Some(path)) = (args.first(), args.get(1)) else {
+        eprintln!("error: usage: tired replay <rec.json> <file.tired>");
+        return ExitCode::FAILURE;
+    };
+    let Some(src) = read(path) else {
+        return ExitCode::FAILURE;
+    };
+    let (compiled, diags) = compile(&src, path);
+    if report(&diags, &src, path) {
+        return ExitCode::FAILURE;
+    }
+    let Some(compiled) = compiled else {
+        return ExitCode::FAILURE;
+    };
+    let mode = match RecordMode::replay_from(rec) {
+        Ok(m) => m,
+        Err(e) => {
+            eprintln!("error: {e}");
+            return ExitCode::FAILURE;
+        }
+    };
+    let rt = Runtime::with_mode(compiled, mode);
+    match rt.run().await {
+        Ok(Some(v)) if !matches!(v, Value::Null) => println!("=> {}", v.display()),
+        Ok(_) => {}
+        Err(e) => {
+            eprintln!("runtime error: {e}");
+            return ExitCode::FAILURE;
+        }
     }
     ExitCode::SUCCESS
 }
