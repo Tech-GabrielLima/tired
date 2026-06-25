@@ -1,0 +1,42 @@
+{
+  "name": "tired-lang",
+  "displayName": "TIRED",
+  "description": "Syntax highlighting and language server (live diagnostics, completion, hover) for the TIRED API-consumption language.",
+  "version": "0.1.0",
+  "publisher": "gabriel-lima",
+  "license": "MIT",
+  "engines": { "vscode": "^1.75.0" },
+  "categories": ["Programming Languages", "Linters"],
+  "activationEvents": ["onLanguage:tired"],
+  "main": "./extension.js",
+  "contributes": {
+    "languages": [
+      {
+        "id": "tired",
+        "aliases": ["TIRED", "tired"],
+        "extensions": [".tired"],
+        "configuration": "./language-configuration.json"
+      }
+    ],
+    "grammars": [
+      {
+        "language": "tired",
+        "scopeName": "source.tired",
+        "path": "./syntaxes/tired.tmLanguage.json"
+      }
+    ],
+    "configuration": {
+      "title": "TIRED",
+      "properties": {
+        "tired.serverPath": {
+          "type": "string",
+          "default": "tired",
+          "description": "Path to the `tired` binary used to launch the language server (`tired lsp`)."
+        }
+      }
+    }
+  },
+  "dependencies": {
+    "vscode-languageclient": "^9.0.1"
+  }
+}
