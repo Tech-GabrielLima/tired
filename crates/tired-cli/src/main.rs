@@ -29,6 +29,7 @@ async fn main() -> ExitCode {
         "inspect" => cmd_inspect(&args[1..]).await,
         "replay" => cmd_replay(&args[1..]).await,
         "schema" => cmd_schema(&args[1..]),
+        "serve" => cmd_serve(&args[1..]).await,
         "lsp" => {
             tired_lsp::run();
             ExitCode::SUCCESS
@@ -61,6 +62,7 @@ fn usage() {
          \x20 tired explain <file>\n\
          \x20 tired inspect <url|file.json> [TypeName]   # infer TIRED types from JSON\n\
          \x20 tired schema  <file>                       # export types/contracts as JSON Schema\n\
+         \x20 tired serve   <file> [Server] [--port N]   # run a `server` block over HTTP\n\
          \x20 tired replay  <rec.json> <file>            # re-run offline from a recording\n\
          \x20 tired lsp                                  # run the language server (stdio)"
     );
@@ -194,6 +196,44 @@ async fn cmd_inspect(args: &[String]) -> ExitCode {
 
     print!("{}", infer::infer_types(&json, &name));
     ExitCode::SUCCESS
+}
+
+/// `tired serve <file> [Server] [--port N]` — run a `server` block over HTTP.
+async fn cmd_serve(args: &[String]) -> ExitCode {
+    let Some(path) = args.first() else {
+        eprintln!("error: `tired serve` needs a file");
+        return ExitCode::FAILURE;
+    };
+    let Some(src) = read(path) else {
+        return ExitCode::FAILURE;
+    };
+    let (compiled, diags) = compile(&src, path);
+    if report(&diags, &src, path) {
+        return ExitCode::FAILURE;
+    }
+    let Some(compiled) = compiled else {
+        return ExitCode::FAILURE;
+    };
+    let port = flag_value(args, "--port").and_then(|p| p.parse::<u16>().ok());
+    let rt = Runtime::new(compiled);
+    let names = rt.server_names();
+    let name = match args.get(1).filter(|a| !a.starts_with("--")) {
+        Some(n) => n.clone(),
+        None => match names.first() {
+            Some(n) => n.clone(),
+            None => {
+                eprintln!("no `server` block found in {path}");
+                return ExitCode::FAILURE;
+            }
+        },
+    };
+    match rt.serve(&name, port).await {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(e) => {
+            eprintln!("serve error: {e}");
+            ExitCode::FAILURE
+        }
+    }
 }
 
 /// `tired schema <file>` — export the program's types/contracts as JSON Schema.

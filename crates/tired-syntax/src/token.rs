@@ -32,6 +32,8 @@ pub enum TokenKind {
     Log,
     Return,
     Params,
+    Server,
+    Route,
     Where,
     Retry,
     Wait,
@@ -119,6 +121,8 @@ impl TokenKind {
             Log => "log",
             Return => "return",
             Params => "params",
+            Server => "server",
+            Route => "route",
             Where => "where",
             Retry => "retry",
             Wait => "wait",
@@ -172,8 +176,10 @@ impl TokenKind {
         use TokenKind::*;
         match self {
             Endpoint | Type | Contract | Flow | Fetch | Parallel | Match | Mock | Test | Using
-            | Assert | Let | Log | Return | Params | Where | Retry | Wait | Then | In | By
-            | Asc | Desc | And | Or | Not | True | False | Null => Some(self.symbol()),
+            | Assert | Let | Log | Return | Params | Server | Route | Where | Retry | Wait
+            | Then | In | By | Asc | Desc | And | Or | Not | True | False | Null => {
+                Some(self.symbol())
+            }
             _ => None,
         }
     }
@@ -198,6 +204,8 @@ pub(crate) fn keyword(ident: &str) -> Option<TokenKind> {
         "log" => Log,
         "return" => Return,
         "params" => Params,
+        "server" => Server,
+        "route" => Route,
         "where" => Where,
         "retry" => Retry,
         "wait" => Wait,

@@ -14,6 +14,7 @@ pub mod infer;
 mod mock;
 mod record;
 pub mod schema;
+mod server;
 pub mod value;
 
 use std::collections::HashMap;
@@ -145,6 +146,21 @@ impl Runtime {
             }
         }
         report
+    }
+
+    /// Serve a `server` block over HTTP (runs until stopped).
+    pub async fn serve(&self, name: &str, port: Option<u16>) -> Result<(), RunError> {
+        server::serve(self.shared.clone(), name, port).await
+    }
+
+    /// Names of the declared servers (so the CLI can default to the only one).
+    pub fn server_names(&self) -> Vec<String> {
+        self.shared
+            .compiled
+            .servers
+            .iter()
+            .map(|s| s.name.clone())
+            .collect()
     }
 
     pub fn metrics(&self) -> MetricsSnapshot {

@@ -6,6 +6,7 @@
 //! `None` if there were errors).
 
 pub mod check;
+pub mod cost;
 pub mod ir;
 pub mod lower;
 pub mod optimize;
@@ -25,6 +26,7 @@ pub struct Compiled {
     pub main: ir::Body,
     pub flows: Vec<ir::Flow>,
     pub tests: Vec<ir::Test>,
+    pub servers: Vec<ir::Server>,
 }
 
 impl Compiled {
@@ -32,9 +34,13 @@ impl Compiled {
         self.flows.iter().find(|f| f.name == name)
     }
 
+    pub fn server(&self, name: &str) -> Option<&ir::Server> {
+        self.servers.iter().find(|s| s.name == name)
+    }
+
     /// The human-readable parallel execution plan (`tired explain`).
     pub fn plan(&self) -> String {
-        optimize::render_plan(&self.main, &self.flows, &self.tests)
+        optimize::render_plan(&self.main, &self.flows, &self.tests, &self.servers)
     }
 }
 
@@ -47,8 +53,8 @@ pub fn compile(src: &str, path: &str) -> (Option<Compiled>, Diagnostics) {
     let (analysis, check_diags) = check(&program);
     diags.extend(check_diags);
 
-    let (mut main, mut flows, mut tests) = lower::lower_program(&program);
-    let opt_diags = optimize::optimize(&mut main, &mut flows, &mut tests);
+    let (mut main, mut flows, mut tests, mut servers) = lower::lower_program(&program);
+    let opt_diags = optimize::optimize(&mut main, &mut flows, &mut tests, &mut servers);
     diags.extend(opt_diags);
 
     if diags.has_errors() {
@@ -61,6 +67,7 @@ pub fn compile(src: &str, path: &str) -> (Option<Compiled>, Diagnostics) {
             main,
             flows,
             tests,
+            servers,
         }),
         diags,
     )
@@ -71,8 +78,8 @@ pub fn analyze(src: &str) -> Diagnostics {
     let (program, mut diags) = tired_syntax::parse(src);
     let (_an, check_diags) = check(&program);
     diags.extend(check_diags);
-    let (mut main, mut flows, mut tests) = lower::lower_program(&program);
-    let opt_diags = optimize::optimize(&mut main, &mut flows, &mut tests);
+    let (mut main, mut flows, mut tests, mut servers) = lower::lower_program(&program);
+    let opt_diags = optimize::optimize(&mut main, &mut flows, &mut tests, &mut servers);
     diags.extend(opt_diags);
     diags
 }

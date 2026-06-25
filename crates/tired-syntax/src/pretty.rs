@@ -75,6 +75,24 @@ fn format_item(item: &Item) -> String {
             s.push('}');
             s
         }
+        Item::Server(sv) => {
+            let mut s = format!("server {} {{\n", sv.name.node);
+            for setting in &sv.settings {
+                let vals: Vec<String> = setting.values.iter().map(expr).collect();
+                s.push_str(&format!("  {}: {}\n", setting.key.node, vals.join(" ")));
+            }
+            for r in &sv.routes {
+                s.push_str(&format!(
+                    "  route {} {} -> {{\n",
+                    r.method.node,
+                    path(&r.path)
+                ));
+                s.push_str(&block_body(&r.handler, 2));
+                s.push_str("  }\n");
+            }
+            s.push('}');
+            s
+        }
         Item::Stmt(st) => stmt(st, 0),
     }
 }

@@ -102,6 +102,25 @@ pub struct Test {
     pub body: Body,
 }
 
+/// A compiled `server` declaration.
+#[derive(Clone, Debug)]
+pub struct Server {
+    pub name: String,
+    pub base: String,
+    pub port: Option<u16>,
+    pub routes: Vec<Route>,
+}
+
+/// One route of a server. Its handler `body` is optimized like any other body, so a
+/// fan-out aggregation in the handler is parallelized and deduplicated automatically.
+#[derive(Clone, Debug)]
+pub struct Route {
+    pub method: String,
+    pub path: PathPattern,
+    pub param_names: Vec<String>,
+    pub body: Body,
+}
+
 impl NodeKind {
     pub fn label(&self) -> String {
         match self {

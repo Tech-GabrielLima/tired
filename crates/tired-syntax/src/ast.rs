@@ -18,8 +18,28 @@ pub enum Item {
     Flow(FlowDecl),
     Mock(MockDecl),
     Test(TestDecl),
+    Server(ServerDecl),
     /// A top-level statement (the script "main").
     Stmt(Stmt),
+}
+
+/// An HTTP server: a set of routes whose handlers consume other endpoints. Each handler
+/// goes through the same optimizer, so a fan-out aggregation parallelizes itself.
+#[derive(Clone, Debug)]
+pub struct ServerDecl {
+    pub name: Name,
+    pub settings: Vec<Setting>,
+    pub routes: Vec<ServerRoute>,
+    pub span: Span,
+}
+
+#[derive(Clone, Debug)]
+pub struct ServerRoute {
+    pub method: Name,
+    pub path: PathPattern,
+    /// Handler body; path parameters (plus `query` and `body`) are in scope.
+    pub handler: Block,
+    pub span: Span,
 }
 
 // ---------- declarations ----------

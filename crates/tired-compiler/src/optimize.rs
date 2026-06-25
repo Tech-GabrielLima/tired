@@ -19,7 +19,12 @@ use crate::ir::*;
 
 /// Optimize every body in the program in place, returning warnings (e.g. eliminated
 /// requests). Recurses into `match` arm bodies.
-pub fn optimize(main: &mut Body, flows: &mut [Flow], tests: &mut [Test]) -> Diagnostics {
+pub fn optimize(
+    main: &mut Body,
+    flows: &mut [Flow],
+    tests: &mut [Test],
+    servers: &mut [Server],
+) -> Diagnostics {
     let mut diags = Diagnostics::new();
     optimize_body(main, &mut diags);
     for f in flows.iter_mut() {
@@ -27,6 +32,11 @@ pub fn optimize(main: &mut Body, flows: &mut [Flow], tests: &mut [Test]) -> Diag
     }
     for t in tests.iter_mut() {
         optimize_body(&mut t.body, &mut diags);
+    }
+    for s in servers.iter_mut() {
+        for r in s.routes.iter_mut() {
+            optimize_body(&mut r.body, &mut diags);
+        }
     }
     diags
 }
@@ -204,24 +214,52 @@ fn schedule_waves(body: &mut Body) {
 
 // ---------- execution-plan rendering (`tired explain` / `--show-plan`) ----------
 
-/// Render a human-readable execution plan showing the inferred parallel waves.
-pub fn render_plan(main: &Body, flows: &[Flow], tests: &[Test]) -> String {
+/// Render a human-readable execution plan showing the inferred parallel waves, and the
+/// static request-cost of each flow/route (max requests across all paths).
+pub fn render_plan(main: &Body, flows: &[Flow], tests: &[Test], servers: &[Server]) -> String {
     let mut out = String::new();
-    out.push_str("execution plan (inferred parallelism)\n");
-    out.push_str("=====================================\n");
+    out.push_str("execution plan (inferred parallelism + request cost)\n");
+    out.push_str("====================================================\n");
     if !main.nodes.is_empty() {
-        out.push_str("\nmain:\n");
+        out.push_str(&format!("\nmain:{}\n", cost_suffix(main, flows)));
         render_body_plan(&mut out, main, 1);
     }
     for f in flows {
-        out.push_str(&format!("\nflow {}({}):\n", f.name, f.params.join(", ")));
+        out.push_str(&format!(
+            "\nflow {}({}):{}\n",
+            f.name,
+            f.params.join(", "),
+            cost_suffix(&f.body, flows)
+        ));
         render_body_plan(&mut out, &f.body, 1);
+    }
+    for s in servers {
+        out.push_str(&format!("\nserver {}:\n", s.name));
+        for r in &s.routes {
+            out.push_str(&format!(
+                "  route {} {}:{}\n",
+                r.method,
+                render_path(&r.path),
+                cost_suffix(&r.body, flows)
+            ));
+            render_body_plan(&mut out, &r.body, 2);
+        }
     }
     for t in tests {
         out.push_str(&format!("\ntest {:?}:\n", t.description));
         render_body_plan(&mut out, &t.body, 1);
     }
     out
+}
+
+fn cost_suffix(body: &Body, flows: &[Flow]) -> String {
+    let c = crate::cost::request_cost(body, flows);
+    format!(
+        "  [≤ {} request{}, up to {} in parallel]",
+        c.max_requests,
+        if c.max_requests == 1 { "" } else { "s" },
+        c.max_parallel
+    )
 }
 
 fn render_body_plan(out: &mut String, body: &Body, indent: usize) {
@@ -297,8 +335,8 @@ mod tests {
     fn compile(src: &str) -> (Body, Vec<Flow>, Vec<Test>, Diagnostics) {
         let (prog, d) = tired_syntax::parse(src);
         assert!(!d.has_errors(), "parse error: {}", d.render(src, "t"));
-        let (mut main, mut flows, mut tests) = lower_program(&prog);
-        let diags = optimize(&mut main, &mut flows, &mut tests);
+        let (mut main, mut flows, mut tests, mut servers) = lower_program(&prog);
+        let diags = optimize(&mut main, &mut flows, &mut tests, &mut servers);
         (main, flows, tests, diags)
     }
 
@@ -319,7 +357,7 @@ mod tests {
             stats.max_parallel,
             3,
             "plan: {}",
-            render_plan(&main, &[], &[])
+            render_plan(&main, &[], &[], &[])
         );
     }
 
@@ -337,7 +375,12 @@ mod tests {
             .iter()
             .filter(|n| n.live && n.kind.is_fetch())
             .count();
-        assert_eq!(live_fetches, 1, "plan: {}", render_plan(&main, &[], &[]));
+        assert_eq!(
+            live_fetches,
+            1,
+            "plan: {}",
+            render_plan(&main, &[], &[], &[])
+        );
         let warns: Vec<_> = diags.items().iter().map(|d| d.message.clone()).collect();
         assert!(
             warns.iter().any(|m| m.contains("duplicate request")),
@@ -376,7 +419,7 @@ mod tests {
             stats.max_parallel,
             1,
             "plan: {}",
-            render_plan(&main, &[], &[])
+            render_plan(&main, &[], &[], &[])
         );
     }
 

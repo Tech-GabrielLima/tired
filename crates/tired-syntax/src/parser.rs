@@ -151,6 +151,7 @@ impl Parser {
                     | TokenKind::Flow
                     | TokenKind::Mock
                     | TokenKind::Test
+                    | TokenKind::Server
                     | TokenKind::Fetch
                     | TokenKind::Let
                     | TokenKind::Log
@@ -169,6 +170,7 @@ impl Parser {
             TokenKind::Flow => Ok(Item::Flow(self.parse_flow()?)),
             TokenKind::Mock => Ok(Item::Mock(self.parse_mock()?)),
             TokenKind::Test => Ok(Item::Test(self.parse_test()?)),
+            TokenKind::Server => Ok(Item::Server(self.parse_server()?)),
             _ => Ok(Item::Stmt(self.parse_stmt()?)),
         }
     }
@@ -205,7 +207,8 @@ impl Parser {
         let mut vals = Vec::new();
         loop {
             vals.push(self.parse_expr()?);
-            if self.at(&TokenKind::RBrace) || self.at_eof() {
+            // `route` begins a server route, never a setting value.
+            if self.at(&TokenKind::RBrace) || self.at_eof() || self.at(&TokenKind::Route) {
                 break;
             }
             // A following `name :` starts the next setting (the name may be a keyword
@@ -357,6 +360,61 @@ impl Parser {
         self.expect(TokenKind::RBrace)?;
         Ok(MockDecl {
             name,
+            routes,
+            span: start.merge(self.prev),
+        })
+    }
+
+    fn parse_server(&mut self) -> PResult<ServerDecl> {
+        let start = self.cur_span();
+        self.bump(); // server
+        let name = self.take_ident()?;
+        self.expect(TokenKind::LBrace)?;
+        let mut settings = Vec::new();
+        let mut routes = Vec::new();
+        while !self.at(&TokenKind::RBrace) && !self.at_eof() {
+            if self.at(&TokenKind::Route) {
+                let r_start = self.cur_span();
+                self.bump(); // route
+                let method = self.take_ident()?;
+                let path = self.parse_path()?;
+                self.expect(TokenKind::Arrow)?;
+                let handler = if self.at(&TokenKind::LBrace) {
+                    self.parse_block()?
+                } else {
+                    // A bare expression handler `-> Flow(x)` becomes `{ return Flow(x) }`.
+                    let e = self.parse_expr()?;
+                    let span = e.span();
+                    Block {
+                        stmts: vec![Stmt::Return {
+                            value: Some(e),
+                            span,
+                        }],
+                        span,
+                    }
+                };
+                routes.push(ServerRoute {
+                    method,
+                    path,
+                    handler,
+                    span: r_start.merge(self.prev),
+                });
+            } else {
+                let s_start = self.cur_span();
+                let key = self.take_name_lenient()?;
+                self.expect(TokenKind::Colon)?;
+                let values = self.parse_setting_values()?;
+                settings.push(Setting {
+                    key,
+                    values,
+                    span: s_start.merge(self.prev),
+                });
+            }
+        }
+        self.expect(TokenKind::RBrace)?;
+        Ok(ServerDecl {
+            name,
+            settings,
             routes,
             span: start.merge(self.prev),
         })

@@ -185,6 +185,20 @@ impl Checker {
                     let mut s: Scope = vec![HashMap::new()];
                     self.check_block(&t.body, &mut s);
                 }
+                Item::Server(srv) => {
+                    for route in &srv.routes {
+                        let mut s: Scope = vec![HashMap::new()];
+                        // Path params, plus the request `query`/`body`, are in scope.
+                        for seg in &route.path.segments {
+                            if let PathSeg::Param(Expr::Ident(n)) = seg {
+                                self.bind(&mut s, &n.node, Type::String);
+                            }
+                        }
+                        self.bind(&mut s, "query", Type::Unknown);
+                        self.bind(&mut s, "body", Type::Unknown);
+                        self.check_block(&route.handler, &mut s);
+                    }
+                }
                 _ => {}
             }
         }

@@ -10,8 +10,8 @@ use tired_syntax::span::Span;
 
 use crate::ir::*;
 
-/// Lower a whole program into the top-level body, the flows, and the tests.
-pub fn lower_program(program: &Program) -> (Body, Vec<Flow>, Vec<Test>) {
+/// Lower a whole program into the top-level body, the flows, the tests and the servers.
+pub fn lower_program(program: &Program) -> (Body, Vec<Flow>, Vec<Test>, Vec<Server>) {
     let main_stmts: Vec<Stmt> = program
         .items
         .iter()
@@ -24,6 +24,7 @@ pub fn lower_program(program: &Program) -> (Body, Vec<Flow>, Vec<Test>) {
 
     let mut flows = Vec::new();
     let mut tests = Vec::new();
+    let mut servers = Vec::new();
     for item in &program.items {
         match item {
             Item::Flow(f) => flows.push(Flow {
@@ -36,10 +37,61 @@ pub fn lower_program(program: &Program) -> (Body, Vec<Flow>, Vec<Test>) {
                 mocks: collect_mocks(&t.body.stmts),
                 body: lower_stmts(&t.body.stmts),
             }),
+            Item::Server(s) => servers.push(lower_server(s)),
             _ => {}
         }
     }
-    (main, flows, tests)
+    (main, flows, tests, servers)
+}
+
+fn lower_server(decl: &ServerDecl) -> Server {
+    let mut base = String::new();
+    let mut port = None;
+    for s in &decl.settings {
+        match s.key.node.as_str() {
+            "base" => {
+                if let Some(Expr::Str { parts, .. }) = s.values.first() {
+                    base = parts
+                        .iter()
+                        .filter_map(|p| match p {
+                            StrPart::Lit(t) => Some(t.clone()),
+                            _ => None,
+                        })
+                        .collect();
+                }
+            }
+            "port" => {
+                if let Some(Expr::Int(n, _)) = s.values.first() {
+                    port = Some((*n).clamp(1, 65535) as u16);
+                }
+            }
+            _ => {}
+        }
+    }
+    let routes = decl
+        .routes
+        .iter()
+        .map(|r| Route {
+            method: r.method.node.to_uppercase(),
+            path: r.path.clone(),
+            param_names: r
+                .path
+                .segments
+                .iter()
+                .filter_map(|seg| match seg {
+                    PathSeg::Param(Expr::Ident(n)) => Some(n.node.clone()),
+                    _ => None,
+                })
+                .collect(),
+            body: lower_stmts(&r.handler.stmts),
+        })
+        .collect();
+    Server {
+        name: decl.name.node.clone(),
+        base,
+        port,
+        routes,
+    }
 }
 
 fn collect_mocks(stmts: &[Stmt]) -> Vec<String> {

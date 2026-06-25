@@ -76,6 +76,28 @@ fn response_for(path: &str) -> (&'static str, String) {
     }
 }
 
+fn free_port() -> u16 {
+    let l = TcpListener::bind("127.0.0.1:0").unwrap();
+    l.local_addr().unwrap().port()
+}
+
+/// Minimal blocking HTTP/1.1 GET for driving the TIRED server under test.
+fn http_get(addr: &str, path: &str) -> (u16, String) {
+    let mut stream = TcpStream::connect(addr).unwrap();
+    let req = format!("GET {path} HTTP/1.1\r\nHost: {addr}\r\nConnection: close\r\n\r\n");
+    stream.write_all(req.as_bytes()).unwrap();
+    let mut raw = String::new();
+    stream.read_to_string(&mut raw).unwrap();
+    let status = raw
+        .lines()
+        .next()
+        .and_then(|l| l.split_whitespace().nth(1))
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(0);
+    let body = raw.split("\r\n\r\n").nth(1).unwrap_or("").to_string();
+    (status, body)
+}
+
 fn rt() -> tokio::runtime::Runtime {
     tokio::runtime::Builder::new_multi_thread()
         .worker_threads(4)
@@ -254,6 +276,49 @@ fn benchmark_parallel_vs_serial() {
     assert!(
         parallel < serial,
         "parallel ({parallel:?}) should beat serial ({serial:?})"
+    );
+}
+
+#[test]
+fn server_mode_aggregates_and_parallelizes_upstreams() {
+    let upstream = spawn_server(Duration::from_millis(100));
+    let port = free_port();
+    let src = format!(
+        r#"
+        endpoint Up {{ base: "{}" }}
+        server Gateway {{
+          route GET /agg/{{u}} -> {{
+            fetch Up /users/{{u}}       -> a
+            fetch Up /users/{{u}}/extra -> b
+            return {{ user: a.login, extra: b.login }}
+          }}
+        }}
+        "#,
+        upstream.base
+    );
+    let runtime = build(&src);
+    let rt = rt();
+    rt.spawn(async move {
+        let _ = runtime.serve("Gateway", Some(port)).await;
+    });
+    std::thread::sleep(Duration::from_millis(400)); // let it bind
+
+    let start = Instant::now();
+    let (status, body) = http_get(&format!("127.0.0.1:{port}"), "/agg/gabriel");
+    let elapsed = start.elapsed();
+
+    assert_eq!(status, 200, "body: {body}");
+    assert!(body.contains("\"user\":\"gabriel\""), "body: {body}");
+    assert!(body.contains("\"extra\":\"extra\""), "body: {body}");
+    assert_eq!(
+        upstream.count.load(Ordering::SeqCst),
+        2,
+        "both upstreams should be called"
+    );
+    // The two upstream calls (100ms each) ran in parallel inside the handler.
+    assert!(
+        elapsed < Duration::from_millis(350),
+        "handler should parallelize; took {elapsed:?}"
     );
 }
 
