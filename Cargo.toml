@@ -4,6 +4,7 @@ members = [
     "crates/tired-syntax",
     "crates/tired-compiler",
     "crates/tired-runtime",
+    "crates/tired-lsp",
     "crates/tired-cli",
 ]
 
@@ -20,6 +21,7 @@ description = "TIRED — a compiled domain-specific language for consuming HTTP 
 tired-syntax = { path = "crates/tired-syntax" }
 tired-compiler = { path = "crates/tired-compiler" }
 tired-runtime = { path = "crates/tired-runtime" }
+tired-lsp = { path = "crates/tired-lsp" }
 
 # Runtime-only third-party deps. The compiler front-end (syntax + compiler crates)
 # is deliberately dependency-free std-only Rust; only the runtime touches the network.
