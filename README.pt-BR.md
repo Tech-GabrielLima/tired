@@ -111,20 +111,24 @@ prefiro dizer isso a entregar stubs vazios.
 | Construído e testado ✅ | Projetado, não implementado ⏳ |
 |---|---|
 | Lexer, parser, AST, diagnósticos estilo `rustc` (carets + "did you mean") | Bindings Python / Java (PyO3 / JNI sobre um C ABI) |
-| Type system + checker: `Result` exaustivo, tipagem de campos, resolução | LSP completo + plugins VS Code / IntelliJ |
+| Type system + checker: `Result` exaustivo, tipagem de campos, resolução | Empacotamento das extensões VS Code / IntelliJ (o language server abaixo já as alimenta) |
 | IR + otimizador: **eliminação de requisições mortas**, **inferência de paralelismo** | Codegen WASM / nativo (LLVM), JIT adaptativo |
 | Runtime concorrente: escalonador de ondas, HTTP/2 via `reqwest`, retry/backoff, timeout, auth bearer, cache TTL, contadores estilo Prometheus | Modo cluster distribuído, registry TiredHub |
-| **Mock engine** na própria linguagem + blocos `test` (offline, determinísticos) | Debug time-travel (record/replay), cache via Redis |
-| Verificação de **contratos** em runtime (restrições `where`) | Inferência de schema / import OpenAPI & GraphQL, modo `server` |
-| CLI: `run`, `check`, `test`, `explain`, `fmt` | |
+| **Mock engine** na própria linguagem + blocos `test` (offline, determinísticos) | Cache distribuído via Redis |
+| Verificação de **contratos** em runtime (restrições `where`) | Import de schema OpenAPI / GraphQL, modo `server` |
+| **Language server** (`tired lsp`): diagnostics ao vivo, autocomplete, hover | |
+| **Time-travel** record & replay (`--record` / `tired replay`) | |
+| **Inferência de schema** (`tired inspect` → `type`/`contract` tipados) | |
+| CLI: `run`, `check`, `test`, `explain`, `fmt`, `inspect`, `replay`, `lsp` | |
 
 ---
 
 ## Medido aqui
 
-`cargo test --workspace` → **36 testes + 1 doc-test, 0 falhas** nas quatro crates: lexer/parser, type
+`cargo test --workspace` → **41 testes + 1 doc-test, 0 falhas** nas cinco crates: lexer/parser, type
 checker (cada regra-bandeira tem teste de aceitação e de rejeição), otimizador (paralelismo &
-eliminação) e testes end-to-end de runtime contra um servidor HTTP in-process.
+eliminação), testes end-to-end de runtime contra um servidor HTTP in-process, inferência de schema,
+round-trip de record/replay e o language server (diagnostics/autocomplete/hover).
 
 ### Benchmark de inferência de paralelismo
 
@@ -165,20 +169,25 @@ $ cargo test -p tired-runtime --test integration benchmark -- --nocapture
   Executor de ondas ── dispara as requisições de cada onda concorrentemente
       ├── Motor HTTP: pool HTTP/2, retry+backoff, timeout, auth bearer, cache TTL, métricas
       ├── Motor de mock: roteamento offline e determinístico para `test`
-      └── Verificador de contratos: checagem de restrições `where` em runtime
+      ├── Verificador de contratos: checagem de restrições `where` em runtime
+      ├── Record/replay: captura respostas (`--record`) e as reproduz (`replay`)
       └────────────────────────────────────────────────────────────────────────────────────┘
-            ▲ tired-cli — o binário `tired`: run · check · test · explain · fmt
+            ▲ tired-lsp — language server (reusa o compilador): diagnostics · autocomplete · hover
+            ▲ tired-cli — o binário `tired`: run · check · test · explain · fmt · inspect · replay · lsp
 ```
 
 A separação é proposital: **todo o front-end do compilador é Rust std-only, sem dependências.** Apenas o
-runtime — a parte que realmente precisa de uma stack HTTP assíncrona — usa `tokio` e `reqwest`.
+runtime — a parte que realmente precisa de uma stack HTTP assíncrona — usa `tokio` e `reqwest` (o LSP
+reusa o compilador e só adiciona `serde_json`).
 
 ```
 tired/
 ├── crates/
 │   ├── tired-syntax/    lexer, parser, AST, diagnósticos, pretty-printer  (sem deps)
 │   ├── tired-compiler/  tipos, checker, IR, otimizador                    (sem deps)
-│   ├── tired-runtime/   modelo de valores, eval, motores de mock + HTTP, executor, contratos
+│   ├── tired-runtime/   modelo de valores, eval, motores mock + HTTP, executor, contratos,
+│   │                    inferência de schema (`inspect`), record/replay
+│   ├── tired-lsp/       language server via stdio (diagnostics, autocomplete, hover)
 │   └── tired-cli/       o driver de linha de comando `tired`
 ├── examples/            programas .tired executáveis (live + offline)
 └── docs/                DESIGN.md e a gramática formal (grammar.ebnf)
@@ -202,6 +211,16 @@ tired fmt     examples/mocked.tired      # formatação canônica
 # Live (usa a API pública do GitHub):
 tired run examples/parallel.tired --show-plan --metrics
 tired run examples/github_dashboard.tired --flow Dashboard octocat
+
+# Inferência de schema — gera tipos TIRED de qualquer JSON:
+tired inspect https://api.github.com/users/octocat User
+
+# Time-travel: grave uma vez (live), reproduza pra sempre (offline, determinístico):
+tired run    examples/parallel.tired --record session.json
+tired replay session.json examples/parallel.tired
+
+# Language server (aponte o cliente LSP do seu editor pra cá):
+tired lsp
 ```
 
 Rodar a suíte de testes e o benchmark:

@@ -131,15 +131,36 @@ annotate it as `Result<...>`).
 
 ---
 
-## 8. Deliberate limitations
+## 8. Tooling
+
+Three pieces of tooling reuse the core rather than re-implementing it.
+
+- **Schema inference (`infer.rs`, `tired inspect`).** Given a JSON sample (a live URL or a file), it
+  reconstructs TIRED `type` declarations: objects become typed records, arrays of objects become `Elem[]`
+  with a *merged* element type (a field present in only some elements is marked nullable), and strings get
+  semantic types (`Url`, `Email`, `DateTime`, `UUID`) by light heuristics. Pure and unit-tested.
+- **Record & replay (`record.rs`, `--record` / `tired replay`).** In record mode every request's raw
+  outcome is captured under a canonical key (`GET endpoint/path?sortedquery`) and written as JSON. In
+  replay mode that file is served back *before* the network is touched — a missing key is a hard error, so
+  a replay is fully deterministic and offline. This is "time-travel" debugging: reproduce exactly what an
+  API returned without the live service.
+- **Language server (`tired-lsp`, `tired lsp`).** A stdio LSP that runs `tired_compiler::analyze` on every
+  edit and publishes the same diagnostics the CLI prints (byte spans mapped to UTF-16 LSP ranges), plus
+  keyword/endpoint **completion** and **hover**. The message handler is pure and unit-tested; the loop only
+  adds Content-Length framing. It depends only on the compiler + `serde_json`.
+
+---
+
+## 9. Deliberate limitations
 
 These keep the implementation honest and focused on the language ideas:
 
-- **Inference is annotation-driven.** Without a binding annotation a fetch result is `Unknown`, so field
-  and exhaustiveness checks don't apply to it. Opting into `Result<...>` is how you opt into checked
-  error handling. There is no schema inference from live responses.
+- **Type-checker inference is annotation-driven.** Without a binding annotation a fetch result is
+  `Unknown`, so field and exhaustiveness checks don't apply to it. Opting into `Result<...>` is how you opt
+  into checked error handling. (`tired inspect` generates types offline from a sample, but the type checker
+  itself does not infer response shapes from the network.)
 - **`fetch` is GET.** The client surface models read APIs; the `server` side of the original spec
-  (defining routes, generating OpenAPI/SDKs) is not built.
+  (defining routes, generating OpenAPI/SDKs) and OpenAPI/GraphQL schema *import* are not built.
 - **Pipelines build a per-element scope by cloning.** Fine for typical API payloads; a huge array with a
   large environment would want a cheaper scope representation.
 - **Expression-position `match` is synchronous.** A `match` used as a value (`let x = match …`) cannot do
