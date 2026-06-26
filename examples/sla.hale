@@ -1,0 +1,37 @@
+// Two compile-time guarantees no HTTP client can give you:
+//   1. a request/latency BUDGET enforced by the optimizer's cost analysis, and
+//   2. SECRET-LEAK prevention — a `Secret` value can never reach a log or a response.
+//
+//   hale explain examples/sla.hale     # request cost (incl. critical-path hops) + budgets
+//   hale check   examples/sla.hale     # type-checks: budget met, no secret leaks
+
+endpoint Billing {
+  base:    "https://api.billing.com"
+  auth:    Bearer($BILLING_KEY)
+  timeout: 4s
+}
+
+// A `Secret` field is tracked from the response onward: it may flow INTO a request
+// (its whole purpose), but the program will NOT compile if it reaches a `log` or an
+// outgoing HTTP response.
+type Customer {
+  id:    Integer
+  email: Email
+  card:  Secret
+}
+
+// `budget(...)` is a compile-time SLA. The cost analysis bounds the worst case across
+// every path; exceeding any declared field is a hard compile error. Here: at most 3
+// requests, at most 2 of them concurrent, and a critical path of 2 sequential hops.
+flow Overview(id: String) -> Customer budget(requests: 3, parallel: 2, hops: 2) {
+  fetch Billing /customers/{id} -> customer: Customer
+
+  // These two need `customer` first, but not each other — so the optimizer runs them
+  // together in one parallel wave: a single extra hop, two concurrent requests.
+  fetch Billing /customers/{customer.id}/invoices      | count() -> invoices
+  fetch Billing /customers/{customer.id}/subscriptions | count() -> subs
+
+  // `email` is fine to log. Logging `customer.card` (a Secret) would not compile.
+  log "{customer.email}: {invoices} invoices, {subs} subscriptions"
+  return customer
+}

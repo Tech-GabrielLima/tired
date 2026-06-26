@@ -1,9 +1,9 @@
-//! A pretty-printer over the AST. Powers `tired fmt` (canonical formatting) and is also
+//! A pretty-printer over the AST. Powers `hale fmt` (canonical formatting) and is also
 //! used for short, readable expression snippets in runtime error messages.
 
 use crate::ast::*;
 
-/// Format an entire program into canonical TIRED source.
+/// Format an entire program into canonical hale source.
 pub fn program(p: &Program) -> String {
     let mut out = String::new();
     for (i, item) in p.items.iter().enumerate() {
@@ -51,7 +51,14 @@ fn format_item(item: &Item) -> String {
                 .as_ref()
                 .map(|r| format!(" -> {}", type_expr(r)))
                 .unwrap_or_default();
-            let mut s = format!("flow {}({}){} {{\n", f.name.node, params.join(", "), ret);
+            let bud = f.budget.as_ref().map(budget_clause).unwrap_or_default();
+            let mut s = format!(
+                "flow {}({}){}{} {{\n",
+                f.name.node,
+                params.join(", "),
+                ret,
+                bud
+            );
             s.push_str(&block_body(&f.body, 1));
             s.push('}');
             s
@@ -82,10 +89,12 @@ fn format_item(item: &Item) -> String {
                 s.push_str(&format!("  {}: {}\n", setting.key.node, vals.join(" ")));
             }
             for r in &sv.routes {
+                let bud = r.budget.as_ref().map(budget_clause).unwrap_or_default();
                 s.push_str(&format!(
-                    "  route {} {} -> {{\n",
+                    "  route {} {}{} -> {{\n",
                     r.method.node,
-                    path(&r.path)
+                    path(&r.path),
+                    bud
                 ));
                 s.push_str(&block_body(&r.handler, 2));
                 s.push_str("  }\n");
@@ -94,6 +103,25 @@ fn format_item(item: &Item) -> String {
             s
         }
         Item::Stmt(st) => stmt(st, 0),
+    }
+}
+
+/// Render a ` budget(requests: N, parallel: K, hops: M)` clause (only the set fields).
+fn budget_clause(b: &Budget) -> String {
+    let mut parts = Vec::new();
+    if let Some(r) = b.requests {
+        parts.push(format!("requests: {r}"));
+    }
+    if let Some(p) = b.parallel {
+        parts.push(format!("parallel: {p}"));
+    }
+    if let Some(h) = b.hops {
+        parts.push(format!("hops: {h}"));
+    }
+    if parts.is_empty() {
+        String::new()
+    } else {
+        format!(" budget({})", parts.join(", "))
     }
 }
 

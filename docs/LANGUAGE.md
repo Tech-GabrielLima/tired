@@ -1,14 +1,14 @@
-# TIRED — Language Reference
+# hale — Language Reference
 
-*The Internet Request & Execution Domain-language*
+*HTTP API Language & Engine*
 
-This is the complete reference manual for the TIRED language: every construct, its
+This is the complete reference manual for the hale language: every construct, its
 syntax, its meaning, and what the compiler guarantees. It documents the language **as
 implemented** — if something is described here, it compiles and runs. For the design
 rationale and the internals of each compiler stage, see [DESIGN.md](DESIGN.md); for the
 formal grammar, see [grammar.ebnf](grammar.ebnf).
 
-> **Mental model.** A TIRED program is a small script that *consumes* (and optionally
+> **Mental model.** A hale program is a small script that *consumes* (and optionally
 > *serves*) HTTP APIs. You write straight-line code; the compiler type-checks your error
 > handling, then the optimizer rewrites your requests into the fastest *safe* schedule —
 > running independent calls in parallel, collapsing duplicates, and dropping calls whose
@@ -43,21 +43,21 @@ formal grammar, see [grammar.ebnf](grammar.ebnf).
 
 ## 1. Getting started
 
-TIRED is a Rust workspace; the language is driven by the `tired` binary.
+hale is a Rust workspace; the language is driven by the `hale` binary.
 
 ```bash
-cargo build                                # builds the `tired` binary
-alias tired="cargo run -q -p tired-cli --"
+cargo build                                # builds the `hale` binary
+alias hale="cargo run -q -p hale-cli --"
 
-tired check   examples/broken.tired        # type-check, see diagnostics
-tired test    examples/mocked.tired        # run test blocks, fully offline
-tired explain examples/parallel.tired      # print the optimized execution plan
-tired run     examples/parallel.tired      # actually execute (hits the network)
+hale check   examples/broken.hale        # type-check, see diagnostics
+hale test    examples/mocked.hale        # run test blocks, fully offline
+hale explain examples/parallel.hale      # print the optimized execution plan
+hale run     examples/parallel.hale      # actually execute (hits the network)
 ```
 
 A minimal program declares an endpoint and fetches from it:
 
-```tired
+```hale
 endpoint GitHub {
   base: "https://api.github.com"
 }
@@ -67,7 +67,7 @@ log "hello, {user.login}"
 ```
 
 Top-level statements (those not inside a `flow`, `test`, or `server`) form the program's
-**`main` body** — the entry point that `tired run` executes.
+**`main` body** — the entry point that `hale run` executes.
 
 ---
 
@@ -77,7 +77,7 @@ Top-level statements (those not inside a `flow`, `test`, or `server`) form the p
 
 Only line comments, introduced by `//`, run to end of line. There are no block comments.
 
-```tired
+```hale
 // this is a comment
 fetch API /thing -> t   // trailing comments are fine too
 ```
@@ -85,7 +85,7 @@ fetch API /thing -> t   // trailing comments are fine too
 ### Whitespace
 
 Whitespace and newlines are insignificant between tokens; they only separate tokens.
-Indentation carries no meaning. TIRED has **no statement terminators** — statements end
+Indentation carries no meaning. hale has **no statement terminators** — statements end
 where the next one begins. Commas inside record/array literals and `params` blocks are
 optional.
 
@@ -123,7 +123,7 @@ known unit is one duration token; `1..100` lexes as a range (`1 .. 100`), never 
 
 Inside a string, `{ expr }` splices a value; `{{` and `}}` are literal braces.
 
-```tired
+```hale
 log "{user.login}: {top.length} repos"
 log "literal braces: {{ not interpolated }}"
 ```
@@ -133,7 +133,7 @@ log "literal braces: {{ not interpolated }}"
 `$NAME` reads an environment variable as a value — used most often for secrets in endpoint
 config:
 
-```tired
+```hale
 endpoint Stripe {
   base: "https://api.stripe.com/v1"
   auth: Bearer($STRIPE_KEY)
@@ -160,7 +160,7 @@ A program is a sequence of **items**. The item kinds are:
 | Contract | `contract` | like `type`, but its `where` constraints are verified at runtime |
 | Flow | `flow` | a named, parameterized sub-program (a "function" that does I/O) |
 | Mock | `mock` | an in-language fake of an endpoint for offline tests |
-| Test | `test` | a named, asserted scenario run by `tired test` |
+| Test | `test` | a named, asserted scenario run by `hale test` |
 | Server | `server` | HTTP routes whose handlers consume APIs (server mode) |
 | Statement | — | bare statements at top level form the `main` body |
 
@@ -172,7 +172,7 @@ Items may appear in any order; forward references between declarations are fine.
 
 An `endpoint` names a base URL and the policy applied to every request to that host.
 
-```tired
+```hale
 endpoint GitHub {
   base:    "https://api.github.com"
   auth:    Bearer($GITHUB_TOKEN)
@@ -215,9 +215,13 @@ error with a "did you mean?" over the declared endpoints.
 ### Semantic (refinement) types
 
 Refinements of `String` that carry intent and map to JSON-Schema `format`s on export, and
-that `tired inspect` infers from samples:
+that `hale inspect` infers from samples:
 
 `Url` · `Email` · `DateTime` · `UUID`
+
+One semantic type is special: **`Secret`** marks a sensitive value (a token, card number,
+password). It behaves like a string, but the compiler tracks it so it can never reach a
+log or an HTTP response — see [secret-leak analysis](#secret-leak-analysis).
 
 ### Composite types
 
@@ -236,7 +240,7 @@ that `tired inspect` infers from samples:
 A `type` declares a named record. Fields are `name: type` (commas optional). A field may
 carry a `where (...)` constraint:
 
-```tired
+```hale
 type User {
   login: String
   id:    Integer
@@ -262,7 +266,7 @@ runtime** against responses. When a fetch is annotated with a contract type, the
 is validated field-by-field; only declared constraints bite (extra/unknown fields are
 tolerated, so contracts don't break when an API adds fields).
 
-```tired
+```hale
 contract Repo {
   id:    Integer where (> 0)
   name:  String  where (length in 1..100)
@@ -281,7 +285,7 @@ A constraint follows a field type and refines its allowed values:
 | `where (length in 1..100)` | the same, applied to the value's **length** (string length / array size) |
 | `where (length > 0)` | a comparison applied to the length |
 
-Constraints surface in two places: `tired schema` turns them into JSON-Schema keywords
+Constraints surface in two places: `hale schema` turns them into JSON-Schema keywords
 (`minimum`, `maxLength`, …), and the runtime contract verifier enforces them on responses.
 
 ---
@@ -303,7 +307,7 @@ fetch [METHOD] Endpoint /path
 - **`/path`** is appended to the endpoint's `base`. Path segments may be identifiers,
   integers, or `{expr}` interpolations:
 
-  ```tired
+  ```hale
   fetch GitHub /users/{username}/repos -> repos
   fetch Store  /orders/{created.id}    -> order   // any expression in braces
   ```
@@ -311,7 +315,7 @@ fetch [METHOD] Endpoint /path
 - **`body <expr>`** sends a JSON request body (typically a record literal). Use it with
   the mutating verbs:
 
-  ```tired
+  ```hale
   fetch POST Store /orders body { item: item, qty: 2 } -> created
   ```
 
@@ -327,7 +331,7 @@ Annotating a fetch as `Result<T, E>` is how you opt into **checked error handlin
 binding is then a value you must `match` (or `return` to propagate). Reading a field off
 it directly is a compile error. See [§9](#9-pattern-matching-and-error-handling).
 
-```tired
+```hale
 fetch Stripe /charges/{id} -> result: Result<Charge, ApiError>
 ```
 
@@ -342,7 +346,7 @@ if you want to handle the failure in-language).
 A `|` after a fetch (or after another pipeline op) transforms the response in-language,
 before it is bound. Pipelines are pure data transforms over arrays.
 
-```tired
+```hale
 fetch GitHub /users/{u}/repos
   | filter(repo => repo.stargazers_count > 100)
   | sort(by: .stargazers_count desc)
@@ -370,7 +374,7 @@ Inside a pipeline op, `.field` is shorthand for "the field of the current elemen
 lambda `x => …` binds the element explicitly. The checker validates these against the
 element type derived from the binding's annotation.
 
-```tired
+```hale
 fetch API /nums | sort(by: .v desc) | pluck(.v) | unique() -> vs   // [3,2,1]
 fetch API /nums | sum(by: .v)  -> total                            // 10
 fetch API /nums | count()      -> n                                // 5
@@ -403,7 +407,7 @@ Properties and methods available on values (postfix, like field access / calls):
 | `.length` | arrays, strings | element count / character count |
 | `.all(x => cond)` | arrays | `true` if every element satisfies the predicate |
 
-```tired
+```hale
 assert repos.length == 2
 assert repos.all(r => r.stars > 100)
 ```
@@ -412,7 +416,7 @@ assert repos.all(r => r.stars > 100)
 
 `param => expr` — an anonymous function, used by pipeline operators and `.all`:
 
-```tired
+```hale
 filter(repo => repo.stars > 100)
 ```
 
@@ -424,7 +428,7 @@ dependency analysis (it isn't a free variable read).
 `{ name: expr, … }` builds an object (commas optional). Prefix it with a type name for a
 **named record literal**: `User { login: "octocat" }`.
 
-```tired
+```hale
 return { login: profile.login, repos: top.length }
 ```
 
@@ -432,7 +436,7 @@ return { login: profile.login, repos: top.length }
 
 `[ a, b, c ]` builds an array; `...expr` splices another array's elements in:
 
-```tired
+```hale
 let xs = [1, 2, 3]
 let ys = [0, ...xs, 4]   // [0,1,2,3,4]
 ```
@@ -445,12 +449,12 @@ As in `§2`: `"{expr} text {expr}"`.
 
 ## 9. Pattern matching and error handling
 
-This is TIRED's flagship feature: **network-dependent error handling, checked at compile
+This is hale's flagship feature: **network-dependent error handling, checked at compile
 time.** A `Result`-typed value is unusable as if it had succeeded — you must `match` it.
 
 ### `match` expressions
 
-```tired
+```hale
 match result {
   Ok(charge)         => charge
   Err(NotFound)      => fallback()
@@ -504,7 +508,7 @@ A `match` arm body may be a **retry chain**: zero or more `(call | wait(expr)) t
 steps, ending in `retry`. It runs the steps (e.g. wait out a rate-limit) and then
 **re-runs the fetch that produced the scrutinee**, capped at a fixed number of attempts.
 
-```tired
+```hale
 Err(RateLimit(ms)) => wait(ms) then retry
 ```
 
@@ -538,10 +542,10 @@ of `log` output) is preserved even as pure computations are reordered around the
 
 ## 11. Flows
 
-A `flow` is a named, parameterized sub-program — TIRED's unit of reuse. It can take typed
+A `flow` is a named, parameterized sub-program — hale's unit of reuse. It can take typed
 parameters, optionally declare a return type, and is called like a function.
 
-```tired
+```hale
 flow Dashboard(username: String) -> User {
   fetch GitHub /users/{username} -> user: User
 
@@ -560,6 +564,8 @@ Dashboard("octocat") -> dash
 
 - Parameters are `name: type`, comma-separated.
 - The optional `-> type` after the parameter list is the return type.
+- An optional **`budget(...)`** clause after the signature declares a compile-time SLA
+  (see [§15](#compile-time-budgets)): `flow F(...) -> T budget(requests: 5, hops: 2) { … }`.
 - A flow's body is optimized independently: its own dependency graph is scheduled into
   waves, so a flow's internal fan-out parallelizes (here, `repos` and `followers` run
   concurrently because both depend only on `username`, not on each other).
@@ -569,17 +575,17 @@ Dashboard("octocat") -> dash
 Run a specific flow from the CLI, passing string arguments:
 
 ```bash
-tired run examples/github_dashboard.tired --flow Dashboard octocat
+hale run examples/github_dashboard.hale --flow Dashboard octocat
 ```
 
 ---
 
 ## 12. Mocks
 
-A `mock` block is an in-language fake of an endpoint, making `tired test` fully offline and
+A `mock` block is an in-language fake of an endpoint, making `hale test` fully offline and
 deterministic. It is a routing table keyed by **method + path**.
 
-```tired
+```hale
 mock GitHub {
   GET /users/{user}/repos -> [
     { id: 1, name: "alpha", stars: 250 },
@@ -594,7 +600,7 @@ mock GitHub {
   the mocked call resolve to a typed `Err`.
 - Path parameters are captured and exposed to the response expression as `$name`:
 
-  ```tired
+  ```hale
   GET /charges/{id} -> { id: $id, amount: 4200, currency: "usd" }
   ```
 
@@ -608,10 +614,10 @@ A mock is activated inside a test with `using mock Name`.
 
 ## 13. Tests
 
-A `test` is a named scenario with assertions, run by `tired test`. Tests are the offline,
+A `test` is a named scenario with assertions, run by `hale test`. Tests are the offline,
 deterministic way to exercise a program — they typically activate a mock first.
 
-```tired
+```hale
 test "keeps only popular repos, most-starred first" {
   using mock GitHub
 
@@ -631,7 +637,7 @@ test "keeps only popular repos, most-starred first" {
 - Each `assert expr` must evaluate truthy; the first failing assertion fails the test with
   a message.
 
-`tired test <file>` runs every `test` in the file and prints a summary:
+`hale test <file>` runs every `test` in the file and prints a summary:
 
 ```text
 test result: ok — 2 passed, 0 failed (of 2)
@@ -641,12 +647,12 @@ test result: ok — 2 passed, 0 failed (of 2)
 
 ## 14. Server mode
 
-A `server` block turns TIRED around: instead of only *consuming* APIs, it *serves* HTTP
-routes. Each route handler is ordinary TIRED code — so the **same optimizer parallelizes
-and deduplicates its upstream calls**. This makes TIRED an API gateway / backend-for-
+A `server` block turns hale around: instead of only *consuming* APIs, it *serves* HTTP
+routes. Each route handler is ordinary hale code — so the **same optimizer parallelizes
+and deduplicates its upstream calls**. This makes hale an API gateway / backend-for-
 frontend whose concurrency the compiler writes for you.
 
-```tired
+```hale
 endpoint GitHub {
   base:    "https://api.github.com"
   timeout: 8s
@@ -681,8 +687,9 @@ server Gateway {
 
 ### Routes
 
-`route METHOD /path -> ( block | expr )`. Inside a route handler these bindings are in
-scope:
+`route METHOD /path [budget(...)] -> ( block | expr )`. A route may declare a
+[`budget`](#compile-time-budgets) just like a flow. Inside a route handler these bindings
+are in scope:
 
 - **path parameters** — `{user}` becomes a `user` binding;
 - **`query`** — the request's query string as an object;
@@ -696,12 +703,12 @@ error).
 ### Running it
 
 ```bash
-tired explain examples/gateway.tired       # plan + request cost (no network)
-tired serve   examples/gateway.tired        # serve on http://127.0.0.1:8088/api/...
-tired serve   examples/gateway.tired Gateway --port 9090
+hale explain examples/gateway.hale       # plan + request cost (no network)
+hale serve   examples/gateway.hale        # serve on http://127.0.0.1:8088/api/...
+hale serve   examples/gateway.hale Gateway --port 9090
 ```
 
-If a file declares a single `server`, `tired serve` picks it automatically; otherwise name
+If a file declares a single `server`, `hale serve` picks it automatically; otherwise name
 it.
 
 ---
@@ -717,7 +724,7 @@ each is implemented.
 Each body is lowered to a dependency graph (a node depends on the most recent node that
 wrote a variable it reads). Nodes are levelled topologically into **waves**; nodes in the
 same wave are mutually independent and **execute concurrently**. You write sequential
-`fetch`es; the optimizer runs the independent ones in parallel. `tired explain` prints the
+`fetch`es; the optimizer runs the independent ones in parallel. `hale explain` prints the
 waves:
 
 ```text
@@ -757,37 +764,94 @@ compiler knows the difference between a safe read and a side effect.
 
 ### Static request-cost analysis
 
-Walking the optimized IR, the compiler bounds **how many network requests any path through
-a flow or route can issue**, and **how many run in parallel** — a `match` takes the *max*
-over its arms; a flow call adds that flow's cost; recursion is bounded. It is surfaced by
-`tired explain`:
+Walking the optimized IR, the compiler bounds, for every flow / route / the main script:
+
+- **`max_requests`** — how many network requests any single path can issue (a `match`
+  takes the *max* over its arms; a flow call adds that flow's cost; recursion is bounded);
+- **`max_parallel`** — the widest fan-out (most requests in one concurrent wave);
+- **`hops`** — the **critical-path depth**: the number of *sequential* request round-trips
+  on the longest dependency chain. Independent requests in one wave count as a single hop,
+  so this is the dominant factor in latency.
+
+It is surfaced by `hale explain`:
 
 ```text
 server Gateway:
-  route GET /dashboard/{..}:  [≤ 3 requests, up to 3 in parallel]
+  route GET /dashboard/{..}:  [≤ 3 requests, up to 3 in parallel, 1 hop deep]
 ```
 
-No HTTP client tells you the blast radius of an endpoint at compile time. TIRED reads it
+No HTTP client tells you the blast radius of an endpoint at compile time. hale reads it
 off the IR.
+
+### Compile-time budgets
+
+Because the cost is known statically, a flow or route can **declare** it and have the
+compiler enforce it. A `budget(...)` clause names any of three bounds; if the worst-case
+analysis exceeds one, the program does not compile:
+
+```hale
+flow Overview(id: String) -> Customer budget(requests: 3, parallel: 2, hops: 2) {
+  fetch Billing /customers/{id}                        -> customer: Customer
+  fetch Billing /customers/{customer.id}/invoices      | count() -> invoices
+  fetch Billing /customers/{customer.id}/subscriptions | count() -> subs
+  log "{customer.email}: {invoices} invoices, {subs} subscriptions"
+  return customer
+}
+```
+
+| Field | Bounds | Checked against |
+|---|---|---|
+| `requests: N` | total network calls on any path | `max_requests` |
+| `parallel: K` | concurrent calls in the widest wave | `max_parallel` |
+| `hops: M` | sequential round-trips on the critical path | `hops` (depth) |
+
+```text
+error: flow `Overview` has a critical path of 3 sequential hops, over its budget of 2
+   = help: remove a data dependency so more calls run in one wave, or raise `budget(hops: M)`
+```
+
+A performance SLA that is part of the program's type and enforced by the compiler — not a
+dashboard checked after an incident.
+
+### Secret-leak analysis
+
+A field declared `Secret` is **tracked** from the response onward. It may flow *into* a
+request (its purpose), but the program will not compile if it reaches an observable sink —
+a `log`, or an HTTP response returned from a `server` route:
+
+```hale
+type Customer { id: Integer  email: Email  card: Secret }
+```
+
+```text
+error: secret value `card` must not appear in a log statement
+   = note: secret-leak analysis: values typed `Secret` are tracked into every sink
+```
+
+The check is conservative and transitive: returning a *whole record* that merely contains
+a `Secret` field from a route is rejected too (`value `account` carries the secret field
+`token``). To expose a sanitized view, return a projection (a record literal / `map`)
+without the secret field. Compile-time PII/secret-leak prevention, from a language that
+knows where your data flows.
 
 ---
 
 ## 16. The command-line tool
 
 ```text
-tired run     <file> [--flow NAME [arg ...]] [--show-plan] [--metrics]
+hale run     <file> [--flow NAME [arg ...]] [--show-plan] [--metrics]
                      [--record <rec.json>] [--replay <rec.json>]
-tired check   <file>
-tired fmt     <file> [--write]
-tired test    <file>
-tired explain <file>                         (alias: tired plan)
-tired inspect <url|file.json> [TypeName]     # infer TIRED types from JSON
-tired schema  <file> [--title T]             # export types/contracts as JSON Schema
-tired serve   <file> [Server] [--port N]     # run a `server` block over HTTP
-tired replay  <rec.json> <file>              # re-run offline from a recording
-tired lsp                                    # run the language server (stdio)
-tired version | --version | -V
-tired help    | --help    | -h
+hale check   <file>
+hale fmt     <file> [--write]
+hale test    <file>
+hale explain <file>                         (alias: hale plan)
+hale inspect <url|file.json> [TypeName]     # infer hale types from JSON
+hale schema  <file> [--title T]             # export types/contracts as JSON Schema
+hale serve   <file> [Server] [--port N]     # run a `server` block over HTTP
+hale replay  <rec.json> <file>              # re-run offline from a recording
+hale lsp                                    # run the language server (stdio)
+hale version | --version | -V
+hale help    | --help    | -h
 ```
 
 | Command | What it does |
@@ -797,7 +861,7 @@ tired help    | --help    | -h
 | `fmt` | canonical formatting via the pretty-printer; `--write` rewrites the file in place. |
 | `test` | run every `test` block and report passed/failed. |
 | `explain` | print the optimized execution plan (waves + request cost) without running. |
-| `inspect` | infer TIRED `type` declarations from a JSON sample (a URL or a `.json` file). |
+| `inspect` | infer hale `type` declarations from a JSON sample (a URL or a `.json` file). |
 | `schema` | emit JSON Schema (2020-12) for the file's `type`/`contract` declarations. |
 | `serve` | run a `server` block as a live HTTP server. |
 | `replay` | re-run a program against a saved recording (offline, deterministic). |
@@ -807,24 +871,24 @@ tired help    | --help    | -h
 
 ## 17. Tooling
 
-### Formatter (`tired fmt`)
+### Formatter (`hale fmt`)
 
 A canonical pretty-printer round-trips any valid program to a normalized form. `--write`
 edits in place; without it, the formatted source is printed.
 
-### Schema inference (`tired inspect`)
+### Schema inference (`hale inspect`)
 
-Given a JSON sample, reconstructs TIRED `type` declarations: objects become typed records,
+Given a JSON sample, reconstructs hale `type` declarations: objects become typed records,
 arrays of objects become `Elem[]` with a *merged* element type (a field present in only
 some elements is marked optional), and strings get semantic types (`Url`, `Email`,
 `DateTime`, `UUID`) by light heuristics.
 
 ```bash
-tired inspect https://api.github.com/users/octocat User
-tired inspect ./sample.json Payload
+hale inspect https://api.github.com/users/octocat User
+hale inspect ./sample.json Payload
 ```
 
-### JSON Schema export (`tired schema`)
+### JSON Schema export (`hale schema`)
 
 Emits JSON Schema 2020-12 from declared `type`/`contract`s — field types map to JSON-Schema
 types (with `format`s for `Url`/`Email`/…), and `where` constraints become `minimum` /
@@ -836,15 +900,15 @@ Record every request's outcome once against the live API, then replay forever �
 deterministic. A missing key in a replay is a hard error, so a replay is reproducible.
 
 ```bash
-tired run    examples/parallel.tired --record session.json   # capture (live)
-tired replay session.json examples/parallel.tired            # reproduce (offline)
+hale run    examples/parallel.hale --record session.json   # capture (live)
+hale replay session.json examples/parallel.hale            # reproduce (offline)
 ```
 
-### Language server (`tired lsp`)
+### Language server (`hale lsp`)
 
 A stdio LSP that runs the compiler on every edit and publishes the same diagnostics the CLI
 prints, plus keyword/endpoint **completion** and **hover**. Point any LSP client at
-`tired lsp`. A **VS Code extension** (`editors/vscode`) packages it with a TextMate grammar
+`hale lsp`. A **VS Code extension** (`editors/vscode`) packages it with a TextMate grammar
 for syntax highlighting.
 
 ### Python bindings (PyO3)
@@ -853,31 +917,31 @@ The compiler + runtime are exposed to Python as a single `abi3` wheel (works on 
 3.8+), installable with `maturin`:
 
 ```bash
-pip install maturin && (cd crates/tired-py && maturin develop)
+pip install maturin && (cd crates/hale-py && maturin develop)
 ```
 
 ```python
-import tired
-tired.is_valid(src)                       # -> bool
-tired.check(src)                          # -> list of diagnostic strings
-tired.explain(src)                        # -> the execution plan
-tired.run(src)                            # -> run the program
-tired.inspect('{"id":1}', "User")         # -> inferred TIRED types
-tired.json_schema(src, "API")             # -> JSON Schema
+import hale
+hale.is_valid(src)                       # -> bool
+hale.check(src)                          # -> list of diagnostic strings
+hale.explain(src)                        # -> the execution plan
+hale.run(src)                            # -> run the program
+hale.inspect('{"id":1}', "User")         # -> inferred hale types
+hale.json_schema(src, "API")             # -> JSON Schema
 ```
 
 ---
 
 ## 18. Diagnostics
 
-TIRED's diagnostics follow `rustc`'s style: a message, a primary span with a caret, and
+hale's diagnostics follow `rustc`'s style: a message, a primary span with a caret, and
 `help`/`note` lines. Typos in field names and endpoint names get a "did you mean?"
 suggestion computed with optimal-string-alignment (Levenshtein-with-transposition)
 distance.
 
 ```text
 error: no field `starz` on type `Repo`
-  --> examples/broken.tired:15:25
+  --> examples/broken.hale:15:25
    |
 15 |   | filter(repo => repo.starz > 100)
    |                         ^^^^^
@@ -900,7 +964,7 @@ Deliberate boundaries that keep the implementation honest:
 
 - **Type inference is annotation-driven.** A fetch without a binding annotation is
   `Unknown`; opt into `Result<...>`/record types to get checked error handling and field
-  typing. The checker does not infer response shapes from the network (`tired inspect`
+  typing. The checker does not infer response shapes from the network (`hale inspect`
   generates types offline from a sample instead).
 - **`server` mode is for aggregation, not codegen.** Routes are served and their handlers
   consume APIs, but generating OpenAPI/SDKs from a server — and importing OpenAPI/GraphQL
@@ -921,8 +985,8 @@ Deliberate boundaries that keep the implementation honest:
 
 ```
 endpoint  type  contract  flow  fetch  parallel  match  mock  test  using
-assert    let   log       return  params  server  route  where  retry  wait
-then      in    by        asc     desc    and     or     not    true   false  null
+assert    let   log       return  params  server  route  budget  where  retry
+wait      then  in        by      asc     desc    and    or      not    true   false  null
 ```
 
 HTTP method words (`GET`, `POST`, `PUT`, `PATCH`, `DELETE`, `HEAD`, `OPTIONS`) are
@@ -950,6 +1014,7 @@ structural and bind at the statement/clause level.
 ```
 String  Integer (Int)  Float  Bool  Duration  Null     -- scalars
 Url  Email  DateTime  UUID                              -- semantic refinements of String
+Secret                                                  -- tracked: can't reach a log/response
 T[]            -- array of T
 T?             -- optional T
 Result<T, E>   -- fallible: Ok(T) or an error in E
@@ -971,6 +1036,6 @@ upper-case name you use as a nullary error variant in a closed union or a `mock`
 
 ---
 
-*This reference documents TIRED as implemented in this repository. For the design rationale
+*This reference documents hale as implemented in this repository. For the design rationale
 and the per-stage internals, see [DESIGN.md](DESIGN.md); for the formal grammar, see
 [grammar.ebnf](grammar.ebnf); for runnable programs, see [`examples/`](../examples).*

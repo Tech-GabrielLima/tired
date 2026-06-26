@@ -326,14 +326,63 @@ impl Parser {
         } else {
             None
         };
+        let budget = if self.at(&TokenKind::Budget) {
+            Some(self.parse_budget()?)
+        } else {
+            None
+        };
         let body = self.parse_block()?;
         Ok(FlowDecl {
             name,
             params,
             ret,
+            budget,
             body,
             span: start.merge(self.prev),
         })
+    }
+
+    /// `budget(requests: N, parallel: K, hops: M)` — a compile-time SLA. Each field is
+    /// optional; values are non-negative integers.
+    fn parse_budget(&mut self) -> PResult<Budget> {
+        let start = self.cur_span();
+        self.bump(); // budget
+        self.expect(TokenKind::LParen)?;
+        let mut b = Budget::default();
+        while !self.at(&TokenKind::RParen) && !self.at_eof() {
+            let key = self.take_name_lenient()?;
+            self.expect(TokenKind::Colon)?;
+            let val_span = self.cur_span();
+            let value = self.parse_expr()?;
+            let n = match value {
+                Expr::Int(i, _) if i >= 0 => i as u64,
+                _ => {
+                    return self.err(
+                        val_span,
+                        "a budget value must be a non-negative integer (e.g. `requests: 3`)",
+                    )
+                }
+            };
+            match key.node.as_str() {
+                "requests" => b.requests = Some(n),
+                "parallel" => b.parallel = Some(n),
+                "hops" => b.hops = Some(n),
+                other => {
+                    return self.err(
+                        key.span,
+                        format!(
+                            "unknown budget field `{other}` (expected `requests`, `parallel`, or `hops`)"
+                        ),
+                    )
+                }
+            }
+            if !self.eat(&TokenKind::Comma) {
+                break;
+            }
+        }
+        self.expect(TokenKind::RParen)?;
+        b.span = start.merge(self.prev);
+        Ok(b)
     }
 
     // ---------- mock / test ----------
@@ -378,6 +427,11 @@ impl Parser {
                 self.bump(); // route
                 let method = self.take_ident()?;
                 let path = self.parse_path()?;
+                let budget = if self.at(&TokenKind::Budget) {
+                    Some(self.parse_budget()?)
+                } else {
+                    None
+                };
                 self.expect(TokenKind::Arrow)?;
                 let handler = if self.at(&TokenKind::LBrace) {
                     self.parse_block()?
@@ -396,6 +450,7 @@ impl Parser {
                 routes.push(ServerRoute {
                     method,
                     path,
+                    budget,
                     handler,
                     span: r_start.merge(self.prev),
                 });
@@ -1180,6 +1235,12 @@ impl Parser {
                     if !lit.is_empty() {
                         parts.push(StrPart::Lit(std::mem::take(&mut lit)));
                     }
+                    // Byte offset, in the original source, where the interpolated
+                    // expression begins: past the opening quote (`span.start + 1`) and the
+                    // verbatim text up to and including this `{`. Lets the sub-parser emit
+                    // spans that point back at the real characters (not the fragment).
+                    let base =
+                        span.start + 1 + chars[..=i].iter().map(|c| c.len_utf8()).sum::<usize>();
                     // Collect until the matching '}' (no nested braces inside interpolation).
                     let mut depth = 1;
                     let mut inner = String::new();
@@ -1200,7 +1261,7 @@ impl Parser {
                         }
                         i += 1;
                     }
-                    match self.parse_subexpr(&inner) {
+                    match self.parse_subexpr(&inner, base) {
                         Some(expr) => parts.push(StrPart::Interp(expr)),
                         None => self.diags.push(Diagnostic::error(
                             span,
@@ -1237,10 +1298,15 @@ impl Parser {
     }
 
     /// Parse a single expression from an isolated source fragment (string interpolation).
-    fn parse_subexpr(&mut self, src: &str) -> Option<Expr> {
-        let (tokens, diags) = lex(src);
+    /// `base` is the fragment's byte offset in the original source; token spans are
+    /// shifted by it so diagnostics point at the real characters, not the fragment.
+    fn parse_subexpr(&mut self, src: &str, base: usize) -> Option<Expr> {
+        let (mut tokens, diags) = lex(src);
         if diags.has_errors() {
             return None;
+        }
+        for t in &mut tokens {
+            t.span = Span::new(t.span.start + base, t.span.end + base);
         }
         let mut sub = Parser {
             toks: tokens,
@@ -1363,5 +1429,29 @@ mod tests {
             }
             _ => panic!("expected log of string"),
         }
+    }
+
+    #[test]
+    fn interpolation_spans_point_back_at_the_source() {
+        // An interpolated expression must carry spans into the *original* source, not the
+        // isolated fragment — otherwise diagnostics inside strings point at the wrong place.
+        let src = r#"log "hi {name}!""#;
+        let p = ok(src);
+        let Item::Stmt(Stmt::Log {
+            value: Expr::Str { parts, .. },
+            ..
+        }) = &p.items[0]
+        else {
+            panic!("expected log of string");
+        };
+        let interp = parts
+            .iter()
+            .find_map(|pt| match pt {
+                StrPart::Interp(e) => Some(e),
+                _ => None,
+            })
+            .expect("an interpolation part");
+        let span = interp.span();
+        assert_eq!(&src[span.start..span.end], "name");
     }
 }

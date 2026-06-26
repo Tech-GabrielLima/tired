@@ -1,12 +1,12 @@
-//! The TIRED type system as the checker understands it.
+//! The hale type system as the checker understands it.
 //!
 //! Inference is deliberately *shallow*: where a type is known (a binding annotation, a
 //! declared record, a literal) we track it and check against it; everywhere else we
 //! fall back to [`Type::Unknown`], which suppresses checks. The guiding principle is
 //! **no false positives** — a missing schema must never turn into a spurious error.
 
+use hale_syntax::ast::{FieldDecl, TypeExpr};
 use std::collections::BTreeMap;
-use tired_syntax::ast::{FieldDecl, TypeExpr};
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum Type {
@@ -65,6 +65,12 @@ impl Type {
 
     pub fn is_result(&self) -> bool {
         matches!(self, Type::Result(..))
+    }
+
+    /// `true` for a value declared `Secret` — a string-shaped value the secret-leak
+    /// analysis tracks so it can never reach a log or an HTTP response.
+    pub fn is_secret(&self) -> bool {
+        matches!(self, Type::Semantic(n) if n == "Secret")
     }
 
     /// The element type if this is an array (peeling an outer optional).
@@ -144,9 +150,8 @@ impl TypeTable {
             "String" | "Str" => Type::String,
             "Null" => Type::Null,
             "Duration" => Type::Duration,
-            "Url" | "Email" | "UUID" | "Uuid" | "DateTime" | "Date" | "Status" | "Time" => {
-                Type::Semantic(n.to_string())
-            }
+            "Url" | "Email" | "UUID" | "Uuid" | "DateTime" | "Date" | "Status" | "Time"
+            | "Secret" => Type::Semantic(n.to_string()),
             _ if self.is_record(n) => Type::Record(n.to_string()),
             _ => Type::Unknown,
         }

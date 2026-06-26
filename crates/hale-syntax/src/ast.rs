@@ -1,6 +1,6 @@
-//! The TIRED abstract syntax tree. Nodes carry [`Span`]s so later stages can report
+//! The hale abstract syntax tree. Nodes carry [`Span`]s so later stages can report
 //! precise errors. This is the surface syntax — the compiler lowers it to an IR
-//! ([`tired_compiler::ir`]) before optimization and execution.
+//! ([`hale_compiler::ir`]) before optimization and execution.
 
 use crate::span::{Span, Spanned};
 
@@ -37,8 +37,25 @@ pub struct ServerDecl {
 pub struct ServerRoute {
     pub method: Name,
     pub path: PathPattern,
+    /// Optional statically-enforced SLA, e.g. `budget(requests: 3, hops: 2)`.
+    pub budget: Option<Budget>,
     /// Handler body; path parameters (plus `query` and `body`) are in scope.
     pub handler: Block,
+    pub span: Span,
+}
+
+/// A declared, compiler-enforced bound on the network cost of a `flow` or `route`.
+/// The cost analysis computes the worst case across every path and the checker rejects
+/// the program if any declared field is exceeded — a compile-time SLA.
+#[derive(Clone, Debug, Default)]
+pub struct Budget {
+    /// Max total network requests any single execution path may issue.
+    pub requests: Option<u64>,
+    /// Max requests that may run concurrently (the widest fan-out wave).
+    pub parallel: Option<u64>,
+    /// Max **critical-path depth** — sequential request round-trips, the dominant
+    /// factor in latency. Independent calls in one wave count as a single hop.
+    pub hops: Option<u64>,
     pub span: Span,
 }
 
@@ -114,6 +131,8 @@ pub struct FlowDecl {
     pub name: Name,
     pub params: Vec<Param>,
     pub ret: Option<TypeExpr>,
+    /// Optional statically-enforced SLA, e.g. `budget(requests: 5, hops: 2)`.
+    pub budget: Option<Budget>,
     pub body: Block,
     pub span: Span,
 }

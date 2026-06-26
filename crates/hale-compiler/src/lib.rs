@@ -1,5 +1,5 @@
-//! `tired-compiler` — semantic analysis, the type system, the IR, and the optimizer.
-//! Like `tired-syntax`, this crate is **dependency-free**.
+//! `hale-compiler` — semantic analysis, the type system, the IR, and the optimizer.
+//! Like `hale-syntax`, this crate is **dependency-free**.
 //!
 //! The end-to-end entry point is [`compile`]: it parses, type-checks, lowers to IR and
 //! optimizes, returning a [`Compiled`] program ready for the runtime to execute (or
@@ -15,8 +15,8 @@ pub mod types;
 pub use check::{check, Analysis};
 pub use types::{ErrDomain, Type, TypeTable};
 
-use tired_syntax::ast::Program;
-use tired_syntax::diag::Diagnostics;
+use hale_syntax::ast::Program;
+use hale_syntax::diag::Diagnostics;
 
 /// A fully compiled program: the original AST (the runtime reads endpoint/mock/type
 /// declarations from it) plus the optimized IR bodies.
@@ -38,7 +38,7 @@ impl Compiled {
         self.servers.iter().find(|s| s.name == name)
     }
 
-    /// The human-readable parallel execution plan (`tired explain`).
+    /// The human-readable parallel execution plan (`hale explain`).
     pub fn plan(&self) -> String {
         optimize::render_plan(&self.main, &self.flows, &self.tests, &self.servers)
     }
@@ -47,7 +47,7 @@ impl Compiled {
 /// Parse → check → lower → optimize. Returns the compiled program (when there are no
 /// hard errors) together with all diagnostics (which may include warnings).
 pub fn compile(src: &str, path: &str) -> (Option<Compiled>, Diagnostics) {
-    let (program, mut diags) = tired_syntax::parse(src);
+    let (program, mut diags) = hale_syntax::parse(src);
     let _ = path;
 
     let (analysis, check_diags) = check(&program);
@@ -56,6 +56,7 @@ pub fn compile(src: &str, path: &str) -> (Option<Compiled>, Diagnostics) {
     let (mut main, mut flows, mut tests, mut servers) = lower::lower_program(&program);
     let opt_diags = optimize::optimize(&mut main, &mut flows, &mut tests, &mut servers);
     diags.extend(opt_diags);
+    diags.extend(cost::check_budgets(&flows, &servers));
 
     if diags.has_errors() {
         return (None, diags);
@@ -73,13 +74,14 @@ pub fn compile(src: &str, path: &str) -> (Option<Compiled>, Diagnostics) {
     )
 }
 
-/// Type-check only (used by `tired check`). Returns all diagnostics.
+/// Type-check only (used by `hale check`). Returns all diagnostics.
 pub fn analyze(src: &str) -> Diagnostics {
-    let (program, mut diags) = tired_syntax::parse(src);
+    let (program, mut diags) = hale_syntax::parse(src);
     let (_an, check_diags) = check(&program);
     diags.extend(check_diags);
     let (mut main, mut flows, mut tests, mut servers) = lower::lower_program(&program);
     let opt_diags = optimize::optimize(&mut main, &mut flows, &mut tests, &mut servers);
     diags.extend(opt_diags);
+    diags.extend(cost::check_budgets(&flows, &servers));
     diags
 }

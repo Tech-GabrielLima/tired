@@ -5,8 +5,8 @@
 
 use std::collections::BTreeSet;
 
-use tired_syntax::ast::*;
-use tired_syntax::span::Span;
+use hale_syntax::ast::*;
+use hale_syntax::span::Span;
 
 use crate::ir::*;
 
@@ -30,6 +30,7 @@ pub fn lower_program(program: &Program) -> (Body, Vec<Flow>, Vec<Test>, Vec<Serv
             Item::Flow(f) => flows.push(Flow {
                 name: f.name.node.clone(),
                 params: f.params.iter().map(|p| p.name.node.clone()).collect(),
+                budget: f.budget.clone(),
                 body: lower_stmts(&f.body.stmts),
             }),
             Item::Test(t) => tests.push(Test {
@@ -83,6 +84,7 @@ fn lower_server(decl: &ServerDecl) -> Server {
                     _ => None,
                 })
                 .collect(),
+            budget: r.budget.clone(),
             body: lower_stmts(&r.handler.stmts),
         })
         .collect();

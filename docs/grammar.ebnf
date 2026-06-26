@@ -1,5 +1,5 @@
 (* ============================================================================
-   TIRED — formal grammar (EBNF) for the implemented language.
+   hale — formal grammar (EBNF) for the implemented language.
    Whitespace and `// line comments` are insignificant between tokens.
    ============================================================================ *)
 
@@ -15,8 +15,13 @@ type_decl      = ("type" | "contract") ident [ "." ident ] "{" { field } "}" ;
 field          = name ":" type [ "where" "(" constraint ")" ] [ "," ] ;
 constraint     = [ "length" ] ( cmp_op expr | "in" expr ".." expr ) ;
 
-flow           = "flow" ident "(" [ param { "," param } ] ")" [ "->" type ] block ;
+flow           = "flow" ident "(" [ param { "," param } ] ")" [ "->" type ] [ budget ] block ;
 param          = name ":" type ;
+
+(* A compile-time SLA: the static cost analysis must satisfy every declared bound, or the
+   program is rejected. *)
+budget         = "budget" "(" budget_field { "," budget_field } ")" ;
+budget_field   = ( "requests" | "parallel" | "hops" ) ":" int ;
 
 mock           = "mock" ident "{" { mock_route } "}" ;
 mock_route     = ident path "->" expr ;              (* ident = HTTP method: GET, POST, ... *)
@@ -24,12 +29,15 @@ mock_route     = ident path "->" expr ;              (* ident = HTTP method: GET
 test           = "test" string block ;
 
 server         = "server" ident "{" { setting | route } "}" ;
-route          = "route" ident path "->" ( block | expr ) ;   (* ident = method *)
+route          = "route" ident path [ budget ] "->" ( block | expr ) ;   (* ident = method *)
 
 (* ---- types ---- *)
 
 type           = type_atom { "|" type_atom } ;       (* union, e.g. NotFound | Unauthorized *)
 type_atom      = ident [ "<" type { "," type } ">" ] { "[]" | "?" } ;
+                 (* ident may be a scalar (String, Integer, Float, Bool, Duration), a
+                    semantic refinement (Url, Email, DateTime, UUID, Secret), a declared
+                    record, or Result<T, E> / Option<T>. `Secret` is leak-tracked. *)
 
 (* ---- statements ---- *)
 

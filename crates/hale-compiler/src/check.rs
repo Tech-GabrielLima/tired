@@ -10,9 +10,9 @@
 
 use std::collections::{HashMap, HashSet};
 
-use tired_syntax::ast::*;
-use tired_syntax::diag::{did_you_mean, Diagnostic, Diagnostics};
-use tired_syntax::span::Span;
+use hale_syntax::ast::*;
+use hale_syntax::diag::{did_you_mean, Diagnostic, Diagnostics};
+use hale_syntax::span::Span;
 
 use crate::types::{ErrDomain, RecordField, Type, TypeTable};
 
@@ -41,6 +41,12 @@ struct Checker {
     results: Vec<(String, Type, Span)>,
     /// Names ever used as a `match` scrutinee, or returned directly (= propagated).
     handled: HashSet<String>,
+    /// When `Some(sink)`, we are type-checking an expression that flows to an observable
+    /// sink (a `log`, or an HTTP response in a `server` route). A `Secret`-typed value
+    /// reaching here is a leak. Drives the secret-leak (taint) analysis.
+    leak_sink: Option<&'static str>,
+    /// `true` while checking a `server` route handler (so `return` is a response sink).
+    in_route: bool,
 }
 
 /// Bare identifiers that are language constants / config enums rather than variables.
@@ -125,6 +131,8 @@ impl Checker {
             diags: Diagnostics::new(),
             results: Vec::new(),
             handled: HashSet::new(),
+            leak_sink: None,
+            in_route: false,
         }
     }
 
@@ -141,7 +149,7 @@ impl Checker {
                     .with_help(format!(
                         "`match {name} {{ ... }}` and handle both `Ok` and `Err`, or `return {name}` to propagate it"
                     ))
-                    .with_note("in TIRED a fallible result cannot be silently ignored"),
+                    .with_note("in hale a fallible result cannot be silently ignored"),
                 );
             }
         }
@@ -196,7 +204,11 @@ impl Checker {
                         }
                         self.bind(&mut s, "query", Type::Unknown);
                         self.bind(&mut s, "body", Type::Unknown);
+                        // Inside a route, `return` produces the HTTP response — a sink the
+                        // secret-leak analysis guards.
+                        self.in_route = true;
                         self.check_block(&route.handler, &mut s);
+                        self.in_route = false;
                     }
                 }
                 _ => {}
@@ -231,7 +243,11 @@ impl Checker {
                 self.bind(scope, &name.node, ty);
             }
             Stmt::Log { value, .. } => {
-                self.infer(value, scope, None);
+                let prev = self.leak_sink;
+                self.leak_sink = Some("a log statement");
+                let ty = self.infer(value, scope, None);
+                self.flag_secret_record(&ty, value);
+                self.leak_sink = prev;
             }
             Stmt::Parallel { block, .. } => {
                 // A parallel block shares the enclosing scope; bindings flow outward.
@@ -244,7 +260,15 @@ impl Checker {
                     if let Expr::Ident(n) = v {
                         self.handled.insert(n.node.clone());
                     }
-                    self.infer(v, scope, None);
+                    let prev = self.leak_sink;
+                    if self.in_route {
+                        self.leak_sink = Some("an HTTP response");
+                    }
+                    let ty = self.infer(v, scope, None);
+                    if self.in_route {
+                        self.flag_secret_record(&ty, v);
+                    }
+                    self.leak_sink = prev;
                 }
             }
             Stmt::Assert { value, .. } => {
@@ -366,10 +390,16 @@ impl Checker {
                 Type::String
             }
             Expr::EnvVar(_) => Type::String,
-            Expr::Ident(n) => self.lookup(scope, &n.node).unwrap_or(Type::Unknown),
+            Expr::Ident(n) => {
+                let ty = self.lookup(scope, &n.node).unwrap_or(Type::Unknown);
+                self.flag_secret_value(&ty, &n.node, n.span);
+                ty
+            }
             Expr::ImplicitField(field) => {
                 let base = elem.cloned().unwrap_or(Type::Unknown);
-                self.field_type(&base, field, None)
+                let ty = self.field_type(&base, field, None);
+                self.flag_secret_value(&ty, &field.node, field.span);
+                ty
             }
             Expr::Field { base, field, .. } => {
                 let bt = self.infer(base, scope, elem);
@@ -383,7 +413,9 @@ impl Checker {
                     Expr::Ident(n) => Some(n.node.as_str()),
                     _ => None,
                 };
-                self.field_type(&bt, field, base_name)
+                let ty = self.field_type(&bt, field, base_name);
+                self.flag_secret_value(&ty, &field.node, field.span);
+                ty
             }
             Expr::Call { callee, args, .. } => {
                 self.check_call(callee, args, scope, elem);
@@ -444,7 +476,7 @@ impl Checker {
     fn field_type(
         &mut self,
         base: &Type,
-        field: &tired_syntax::span::Spanned<String>,
+        field: &hale_syntax::span::Spanned<String>,
         base_name: Option<&str>,
     ) -> Type {
         match base {
@@ -462,7 +494,7 @@ impl Checker {
                         ),
                     )
                     .with_help("`match` on it first and read the field inside the `Ok(...)` arm")
-                    .with_note("the request might have failed; TIRED will not let you ignore that"),
+                    .with_note("the request might have failed; hale will not let you ignore that"),
                 );
                 Type::Unknown
             }
@@ -490,6 +522,71 @@ impl Checker {
             }
             Type::Optional(inner) => self.field_type(inner, field, base_name),
             _ => Type::Unknown,
+        }
+    }
+
+    // ---------- secret-leak (taint) analysis ----------
+
+    /// Flag a direct reference to a `Secret`-typed value (an identifier or field access)
+    /// when it appears inside a sink (a `log` or an HTTP response).
+    fn flag_secret_value(&mut self, ty: &Type, label: &str, span: Span) {
+        let Some(sink) = self.leak_sink else { return };
+        if ty.is_secret() {
+            self.diags.push(
+                Diagnostic::error(
+                    span,
+                    format!("secret value `{label}` must not appear in {sink}"),
+                )
+                .with_help("redact it (don't log it / don't put it in the response)")
+                .with_note(
+                    "secret-leak analysis: values typed `Secret` are tracked into every sink",
+                ),
+            );
+        }
+    }
+
+    /// Flag a composite value (a record, or array/optional of records) that *carries* a
+    /// `Secret` field reaching a sink — e.g. `return account` when `account.token: Secret`.
+    fn flag_secret_record(&mut self, ty: &Type, e: &Expr) {
+        let Some(sink) = self.leak_sink else { return };
+        if ty.is_secret() {
+            return; // a direct secret is already reported by `flag_secret_value`
+        }
+        let mut visited = HashSet::new();
+        if let Some(path) = self.secret_field_of(ty, &mut visited) {
+            self.diags.push(
+                Diagnostic::error(
+                    e.span(),
+                    format!(
+                        "value `{}` carries the secret field `{path}` and must not appear in {sink}",
+                        expr_label(e)
+                    ),
+                )
+                .with_help("return a projection without the secret field (e.g. `map`/a record literal)")
+                .with_note("secret-leak analysis: a `Secret` field must never reach a log or a response"),
+            );
+        }
+    }
+
+    /// The dotted path to the first `Secret` field reachable inside a record type, if any.
+    fn secret_field_of(&self, ty: &Type, visited: &mut HashSet<String>) -> Option<String> {
+        match ty {
+            Type::Record(name) => {
+                if !visited.insert(name.clone()) {
+                    return None; // break cyclic record references
+                }
+                for f in self.table.fields(name)? {
+                    if f.ty.is_secret() {
+                        return Some(f.name.clone());
+                    }
+                    if let Some(inner) = self.secret_field_of(&f.ty, visited) {
+                        return Some(format!("{}.{inner}", f.name));
+                    }
+                }
+                None
+            }
+            Type::Array(t) | Type::Optional(t) => self.secret_field_of(t, visited),
+            _ => None,
         }
     }
 
@@ -644,7 +741,7 @@ impl Checker {
                     format!("non-exhaustive match: missing {}", missing.join(", ")),
                 )
                 .with_help(help)
-                .with_note("a TIRED `match` on a Result must handle success and every failure"),
+                .with_note("a hale `match` on a Result must handle success and every failure"),
             );
         }
     }
@@ -694,12 +791,21 @@ impl Checker {
     }
 }
 
+/// A short human-readable label for an expression, used in diagnostics.
+fn expr_label(e: &Expr) -> String {
+    match e {
+        Expr::Ident(n) => n.node.clone(),
+        Expr::Field { base, field, .. } => format!("{}.{}", expr_label(base), field.node),
+        _ => "this value".into(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     fn diags(src: &str) -> Diagnostics {
-        let (prog, pdiags) = tired_syntax::parse(src);
+        let (prog, pdiags) = hale_syntax::parse(src);
         assert!(
             !pdiags.has_errors(),
             "parse error:\n{}",
@@ -803,6 +909,54 @@ mod tests {
         "#;
         let e = errs(src);
         assert!(e.iter().any(|m| m.contains("Unauthorized")), "{e:?}");
+    }
+
+    #[test]
+    fn logging_a_secret_field_is_rejected() {
+        let src = r#"
+            type Account { id: Integer  token: Secret }
+            endpoint API { base: "x" }
+            fetch API /me -> a: Account
+            log "your token is {a.token}"
+        "#;
+        let e = errs(src);
+        assert!(
+            e.iter().any(|m| m.contains("secret value `token`")),
+            "{e:?}"
+        );
+    }
+
+    #[test]
+    fn returning_a_record_with_a_secret_from_a_route_is_rejected() {
+        let src = r#"
+            type Account { id: Integer  token: Secret }
+            endpoint API { base: "x" }
+            server S {
+              route GET /me -> {
+                fetch API /me -> a: Account
+                return a
+              }
+            }
+        "#;
+        let e = errs(src);
+        assert!(
+            e.iter()
+                .any(|m| m.contains("carries the secret field `token`")),
+            "{e:?}"
+        );
+    }
+
+    #[test]
+    fn using_a_secret_in_a_request_is_fine() {
+        // A secret may flow *into* a request (its whole purpose) without being flagged.
+        let src = r#"
+            type Account { id: Integer  token: Secret }
+            endpoint API { base: "x" }
+            fetch API /me -> a: Account
+            fetch API /verify/{a.token} -> ok
+            log "verified {ok.id}"
+        "#;
+        assert!(!diags(src).has_errors(), "{:?}", errs(src));
     }
 
     #[test]

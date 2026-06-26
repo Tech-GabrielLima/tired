@@ -1,12 +1,12 @@
-//! The intermediate representation TIRED optimizes and executes.
+//! The intermediate representation hale optimizes and executes.
 //!
 //! A [`Body`] is a flat list of [`Node`]s plus the **dependency edges** between them.
 //! Crucially the IR makes data dependencies explicit, which is what lets the optimizer
 //! turn sequentially-written code into a parallel schedule (see [`crate::optimize`]).
 //! Expressions are kept as their AST form — only *statements* are lowered to nodes.
 
-use tired_syntax::ast::{Effect, Expr, PathPattern, Pattern, PipelineOp};
-use tired_syntax::span::Span;
+use hale_syntax::ast::{Budget, Effect, Expr, PathPattern, Pattern, PipelineOp};
+use hale_syntax::span::Span;
 
 pub type NodeId = usize;
 
@@ -63,7 +63,7 @@ pub struct FetchIr {
     /// `true` if the binding was annotated `Result<...>` (opts into Ok/Err wrapping).
     pub as_result: bool,
     /// The binding's declared type, if any — used for runtime contract validation.
-    pub contract_ty: Option<tired_syntax::ast::TypeExpr>,
+    pub contract_ty: Option<hale_syntax::ast::TypeExpr>,
 }
 
 #[derive(Clone, Debug)]
@@ -91,6 +91,8 @@ pub enum ArmBodyIr {
 pub struct Flow {
     pub name: String,
     pub params: Vec<String>,
+    /// Declared SLA, enforced against the cost analysis (see [`crate::cost`]).
+    pub budget: Option<Budget>,
     pub body: Body,
 }
 
@@ -118,6 +120,8 @@ pub struct Route {
     pub method: String,
     pub path: PathPattern,
     pub param_names: Vec<String>,
+    /// Declared SLA, enforced against the cost analysis (see [`crate::cost`]).
+    pub budget: Option<Budget>,
     pub body: Body,
 }
 
@@ -147,7 +151,7 @@ impl NodeKind {
 }
 
 pub fn render_path(p: &PathPattern) -> String {
-    use tired_syntax::ast::PathSeg;
+    use hale_syntax::ast::PathSeg;
     let mut s = String::new();
     for seg in &p.segments {
         s.push('/');

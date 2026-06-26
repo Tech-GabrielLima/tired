@@ -1,19 +1,19 @@
-# TIRED — *The Internet Request & Execution Domain-language*
+# hale — *HTTP API Language & Engine*
 
 > **Languages:** **English** · [Português](README.pt-BR.md)
 >
 > **Docs:** [Language Reference](docs/LANGUAGE.md) · [Design & internals](docs/DESIGN.md) · [Grammar (EBNF)](docs/grammar.ebnf)
 
-> **APIs are tired. So I built a language.**
+> ***hale*** *(adj.)* — strong and healthy. Consuming an API should leave your code that way.
 >
-> TIRED is a small **compiled domain-specific language for consuming HTTP APIs**, written from
-> scratch in Rust. It is not a client library — it is a language with a lexer, a recursive-descent
+> hale is a small **compiled domain-specific language for consuming (and serving) HTTP APIs**, written
+> from scratch in Rust. It is not a client library — it is a language with a lexer, a recursive-descent
 > parser, a type checker, an SSA-style IR, an optimizer, and a concurrent runtime. The headline idea:
 > the things you normally hand-roll around every API call — error handling, parallelism, retries,
-> validation — become *properties of the language* that the compiler can check and the optimizer can
-> exploit.
+> validation, *and even your latency/cost budget* — become *properties of the language* that the
+> compiler can check and the optimizer can exploit.
 
-```tired
+```hale
 endpoint GitHub {
   base:    "https://api.github.com"
   auth:    Bearer($GITHUB_TOKEN)
@@ -38,7 +38,7 @@ flow Dashboard(username: String) -> User {
 }
 ```
 
-You wrote three sequential `fetch`es. TIRED's optimizer noticed the last two are independent and
+You wrote three sequential `fetch`es. hale's optimizer noticed the last two are independent and
 scheduled them concurrently — no `Promise.all`, no `CompletableFuture`, no `asyncio.gather`.
 
 ---
@@ -52,25 +52,25 @@ forgetting to handle a failure case, is a **compile error** — there is no `Nul
 discover at 3am.
 
 ```text
-$ tired check examples/broken.tired
+$ hale check examples/broken.hale
 
 error: no field `starz` on type `Repo`
-  --> examples/broken.tired:15:25
+  --> examples/broken.hale:15:25
    |
 15 |   | filter(repo => repo.starz > 100)
    |                         ^^^^^
    = help: did you mean `stars`?
 
 error: cannot read field `name` — `maybe` is a `Result<Repo, ?>`
-  --> examples/broken.tired:22:11
+  --> examples/broken.hale:22:11
    |
 22 | log maybe.name
    |           ^^^^
    = help: `match` on it first and read the field inside the `Ok(...)` arm
-   = note: the request might have failed; TIRED will not let you ignore that
+   = note: the request might have failed; hale will not let you ignore that
 
 error: unhandled error: `maybe` has type `Result<Repo, ?>` and may be an `Err`
-  --> examples/broken.tired:19:32
+  --> examples/broken.hale:19:32
    = help: `match maybe { ... }` and handle both `Ok` and `Err`, or `return maybe` to propagate it
 ```
 
@@ -84,7 +84,7 @@ into **topological waves**. Independent requests land in the same wave and execu
 never asked for it.
 
 ```text
-$ tired explain examples/parallel.tired
+$ hale explain examples/parallel.hale
 
 main:
   wave 1:  ‖ 3 requests in parallel
@@ -111,7 +111,7 @@ warning: request `GitHub /users/torvalds/repos` is never used and was eliminated
 
 Two `fetch`es that issue the **identical** request (same endpoint, path, params, pipeline *and* the same
 inputs) are collapsed — the later one reuses the first's result, so the same URL is never hit twice.
-It's common-subexpression elimination, for the network. `tired explain` shows the second fetch rewritten
+It's common-subexpression elimination, for the network. `hale explain` shows the second fetch rewritten
 to a `let`:
 
 ```text
@@ -129,13 +129,13 @@ The pipeline itself is rich, too: `filter` · `map`/`pluck` · `sort` · `limit`
 
 ### 5 · It serves, too — `consume ↔ serve`
 
-A `server { route GET /dashboard/{u} -> { … } }` turns TIRED into an API gateway / BFF.
-Each route handler is ordinary TIRED code, so the **same optimizer parallelizes and
+A `server { route GET /dashboard/{u} -> { … } }` turns hale into an API gateway / BFF.
+Each route handler is ordinary hale code, so the **same optimizer parallelizes and
 deduplicates its upstream calls** — you write a straight-line aggregation and get the
 fastest safe gateway for free:
 
 ```text
-$ tired explain examples/gateway.tired
+$ hale explain examples/gateway.hale
 server Gateway:
   route GET /dashboard/{..}:  [≤ 3 requests, up to 3 in parallel]
     wave 1:  ‖ 3 requests in parallel
@@ -146,21 +146,73 @@ server Gateway:
 
 ### 6 · It tells you the request cost — *before you ship*
 
-That `[≤ 3 requests, up to 3 in parallel]` is **static request-cost analysis**: walking the
-IR, the compiler bounds how many network calls any path through a route/flow can issue
-(a `match` counts the max over its arms, a flow call adds that flow's cost). No HTTP
-client tells you the blast radius of an endpoint at compile time — TIRED reads it off the
-optimized IR.
+That `[≤ 3 requests, up to 3 in parallel, 1 hop deep]` is **static request-cost analysis**:
+walking the IR, the compiler bounds how many network calls any path through a route/flow can
+issue, how many run **concurrently**, and the **critical-path depth** — the number of
+*sequential* round-trips, which is what actually dominates latency (a `match` counts the max
+over its arms, a flow call adds that flow's cost). No HTTP client tells you the blast radius of
+an endpoint at compile time — hale reads it off the optimized IR.
+
+### 7 · A compile-time SLA — `budget(...)` 🚀
+
+Because the cost is known statically, you can **assert** it. Annotate a flow or route with a
+`budget` and the compiler refuses to build if any path can exceed it:
+
+```hale
+flow Overview(id: String) -> Customer budget(requests: 3, parallel: 2, hops: 2) {
+  fetch Billing /customers/{id} -> customer: Customer
+  fetch Billing /customers/{customer.id}/invoices      | count() -> invoices
+  fetch Billing /customers/{customer.id}/subscriptions | count() -> subs
+  log "{customer.email}: {invoices} invoices, {subs} subscriptions"
+  return customer
+}
+```
+
+```text
+$ hale check examples/sla.hale     # add one more fetch, or tighten the budget…
+error: flow `Overview` has a critical path of 3 sequential hops, over its budget of 2
+  --> examples/sla.hale:26:39
+   = help: remove a data dependency so more calls run in one wave, or raise `budget(hops: M)`
+   = note: static request-cost analysis: sequential round-trips dominate latency
+```
+
+A performance budget that **lives in the type system** and is enforced by the compiler, not a
+dashboard you check after the incident. No client library can do this — they don't know your
+call graph at compile time. hale does.
+
+### 8 · It won't leak your secrets — `Secret` 🔒
+
+Mark a field `Secret` and the compiler **tracks it through the program**. A secret may flow
+*into* a request (that's its job), but if it ever reaches a `log` or an outgoing HTTP response,
+the program does not compile:
+
+```hale
+type Customer { id: Integer  email: Email  card: Secret }
+```
+
+```text
+$ hale check leak.hale
+error: secret value `card` must not appear in a log statement
+  --> leak.hale:5:19
+   |
+ 5 |   log "card is {customer.card}"
+   |                         ^^^^
+   = note: secret-leak analysis: values typed `Secret` are tracked into every sink
+```
+
+It even catches the indirect case — returning a *whole record* that merely contains a `Secret`
+field from a `server` route is rejected too. Compile-time PII/secret-leak prevention, from a
+language that understands where your data flows.
 
 ---
 
 ## Why a language — and how it compares
 
-Client libraries are excellent. The bet TIRED makes is that the *recurring, dangerous* parts of calling
+Client libraries are excellent. The bet hale makes is that the *recurring, dangerous* parts of calling
 an API — parallelism, error handling, retries, validation, testing — shouldn't be re-typed by hand in
 every codebase. They should be **properties the compiler checks and the optimizer exploits**.
 
-| | `requests`/`httpx` (Py) | `fetch`/`axios` (JS) | Feign/RestTemplate (Java) | **TIRED** |
+| | `requests`/`httpx` (Py) | `fetch`/`axios` (JS) | Feign/RestTemplate (Java) | **hale** |
 |---|:---:|:---:|:---:|:---:|
 | Independent calls run in parallel **automatically** | ✗ (manual `gather`) | ✗ (manual `Promise.all`) | ✗ | **✓** |
 | **Won't compile** if you ignore a possible error | ✗ | ✗ | ✗ | **✓** |
@@ -170,9 +222,11 @@ every codebase. They should be **properties the compiler checks and the optimize
 | **Record/replay** for deterministic offline runs | ✗ | ✗ | ✗ | **✓** |
 | **Contract** validation of responses at runtime | ✗ | ✗ | ✗ | **✓** |
 | Schema **inference** + **JSON Schema** export | ✗ | ✗ | ✗ | **✓** |
+| **Request/latency budget** enforced *at compile time* | ✗ | ✗ | ✗ | **✓** |
+| **Secret-leak prevention** (a `Secret` can't reach a log/response) | ✗ | ✗ | ✗ | **✓** |
 | One toolchain: type-check, `fmt`, LSP, explain-plan | n/a | n/a | n/a | **✓** |
 
-Same task — fetch a user, fan out to two more calls, handle a 404 — in Python vs TIRED:
+Same task — fetch a user, fan out to two more calls, handle a 404 — in Python vs hale:
 
 ```python
 # Python (httpx + asyncio): you wire the concurrency and remember to check the status.
@@ -188,8 +242,8 @@ async def dashboard(user):
         return build(r.json(), repos.json(), followers.json())
 ```
 
-```tired
-# TIRED: the 404 is a compile error if unhandled; the fan-out parallelizes itself.
+```hale
+# hale: the 404 is a compile error if unhandled; the fan-out parallelizes itself.
 flow Dashboard(user: String) -> User {
   fetch GitHub /users/{user}          -> u: Result<User, NotFound>
   fetch GitHub /users/{user}/repos     -> repos      # these two are independent,
@@ -208,7 +262,7 @@ five libraries glued together.
 ## What's built vs. what's designed
 
 This repository is the **working core** of the language — it compiles, type-checks, optimizes, and runs
-real programs against real APIs. The original TIRED vision is a multi-year, multi-team product; the
+real programs against real APIs. The original hale vision is a multi-year, multi-team product; the
 parts below the line are deliberately **designed but not implemented**, and I'd rather say so than ship
 hollow stubs.
 
@@ -217,12 +271,14 @@ hollow stubs.
 | Lexer, parser, AST, `rustc`-style diagnostics (carets + "did you mean") | Java (JNI) bindings |
 | Type system + checker: exhaustive `Result` handling, field typing, resolution | IntelliJ plugin (the VS Code extension is built) |
 | IR + optimizer: **dead-request elimination**, **parallel inference**, **request deduplication** | WASM / native (LLVM) codegen, adaptive JIT |
-| **Static request-cost analysis** (max requests & parallelism per route/flow) | Distributed cluster mode, TiredHub registry |
-| Concurrent runtime: wave scheduler, HTTP/2, retry/backoff, timeout, bearer auth, TTL cache, metrics | Redis-backed distributed cache |
-| **Full HTTP verbs** (GET/POST/PUT/PATCH/DELETE) + JSON bodies; mutations never reordered/deduped/auto-retried | OpenAPI / GraphQL schema *import* |
+| **Static request-cost analysis** (max requests, parallelism & critical-path hops) | Distributed cluster mode, haleHub registry |
+| **Compile-time SLA**: `budget(requests/parallel/hops)` enforced against the cost analysis | Redis-backed distributed cache |
+| **Secret-leak (taint) analysis**: a `Secret` value can never reach a log or response | OpenAPI / GraphQL schema *import* |
+| Concurrent runtime: wave scheduler, HTTP/2, retry/backoff, timeout, bearer auth, TTL cache, metrics | |
+| **Full HTTP verbs** (GET/POST/PUT/PATCH/DELETE) + JSON bodies; mutations never reordered/deduped/auto-retried | |
 | **`server` mode** — serve HTTP routes whose handlers consume APIs (auto-parallelized) | |
 | In-language **mock engine** + `test` blocks; runtime **contract** verification | |
-| **Language server** (`tired lsp`) + **VS Code extension**; **Python bindings** (PyO3, pip) | |
+| **Language server** (`hale lsp`) + **VS Code extension**; **Python bindings** (PyO3, pip) | |
 | **Time-travel** record & replay; **schema inference** + **JSON Schema export** | |
 | CLI: `run`, `check`, `test`, `explain`, `fmt`, `inspect`, `schema`, `serve`, `replay`, `lsp` | |
 
@@ -230,20 +286,20 @@ hollow stubs.
 
 ## Measured here
 
-`cargo test --workspace` → **51 tests + 1 doc-test, 0 failures** across six crates: lexer/parser,
-type-checker (every flagship rule has both an accept and a reject test), optimizer (parallelism,
-dead-request elimination, deduplication & request-cost), end-to-end runtime tests against an in-process
-HTTP server — including an **end-to-end `server`-mode test** that starts a TIRED gateway and asserts it
-aggregates two upstreams in parallel — schema inference + JSON Schema export, record/replay round-trips,
-and the language server. The Python bindings (PyO3) build into an `abi3` module and are exercised from
-Python.
+`cargo test --workspace` → **59 tests + 1 doc-test, 0 failures** across six crates: lexer/parser,
+type-checker (every flagship rule — including **budget enforcement** and **secret-leak** — has both an
+accept and a reject test), optimizer (parallelism, dead-request elimination, deduplication, request-cost
+& critical-path hops), end-to-end runtime tests against an in-process HTTP server — including an
+**end-to-end `server`-mode test** that starts a hale gateway and asserts it aggregates two upstreams in
+parallel — schema inference + JSON Schema export, record/replay round-trips, and the language server. The
+Python bindings (PyO3) build into an `abi3` module and are exercised from Python.
 
 ### Parallel-inference benchmark
 
 ```text
-$ cargo test -p tired-runtime --test integration benchmark -- --nocapture
+$ cargo test -p hale-runtime --test integration benchmark -- --nocapture
 
-=== TIRED parallel-inference benchmark (6 fetches @ 100ms/hop) ===
+=== hale parallel-inference benchmark (6 fetches @ 100ms/hop) ===
   serial   (data-dependent chain): 620.1 ms
   parallel (independent, inferred): 104.7 ms
   speedup: 5.92x
@@ -261,18 +317,18 @@ $ cargo test -p tired-runtime --test integration benchmark -- --nocapture
 ## Architecture
 
 ```
-  source.tired
+  source.hale
       │
-      ▼   ┌─────────────────────────── tired-syntax (zero deps) ───────────────────────────┐
-  Lexer → Parser → AST  ·  spans  ·  rustc-style diagnostics  ·  pretty-printer (tired fmt)
+      ▼   ┌─────────────────────────── hale-syntax (zero deps) ───────────────────────────┐
+  Lexer → Parser → AST  ·  spans  ·  rustc-style diagnostics  ·  pretty-printer (hale fmt)
       │   └────────────────────────────────────────────────────────────────────────────────┘
-      ▼   ┌────────────────────────── tired-compiler (zero deps) ─────────────────────────┐
+      ▼   ┌────────────────────────── hale-compiler (zero deps) ─────────────────────────┐
   Type checker  →  IR lowering  →  Optimizer
    · exhaustive Result handling     · free-variable / dependency analysis
    · field typing + did-you-mean    · dead-request elimination
    · endpoint/variable resolution   · parallel inference (topological waves)
       │   └────────────────────────────────────────────────────────────────────────────────┘
-      ▼   ┌────────────── tired-runtime (tokio + reqwest, the only deps) ──────────────────┐
+      ▼   ┌────────────── hale-runtime (tokio + reqwest, the only deps) ──────────────────┐
   Wave executor ── spawns each wave's fetches concurrently
       ├── HTTP engine: HTTP/2 pool, retry+backoff, timeout, bearer auth, TTL cache, metrics
       ├── Mock engine: offline, deterministic routing for `test`
@@ -280,9 +336,9 @@ $ cargo test -p tired-runtime --test integration benchmark -- --nocapture
       ├── Record/replay: capture outcomes (`--record`) and serve them back (`replay`)
       └── HTTP server (`serve`): route handlers run through the same optimizer
       └────────────────────────────────────────────────────────────────────────────────────┘
-            ▲ tired-lsp — language server (reuses the compiler): diagnostics · completion · hover
-            ▲ tired-py  — Python bindings (PyO3, abi3): check · run · inspect · schema
-            ▲ tired-cli — `tired`: run · check · test · explain · fmt · inspect · schema · serve · replay · lsp
+            ▲ hale-lsp — language server (reuses the compiler): diagnostics · completion · hover
+            ▲ hale-py  — Python bindings (PyO3, abi3): check · run · inspect · schema
+            ▲ hale-cli — `hale`: run · check · test · explain · fmt · inspect · schema · serve · replay · lsp
 ```
 
 The split is deliberate: **the entire compiler front-end is dependency-free, std-only Rust.** Only the
@@ -290,17 +346,17 @@ runtime — the part that genuinely needs an async HTTP stack — pulls in `toki
 reuses the compiler and only adds `serde_json`).
 
 ```
-tired/
+hale/
 ├── crates/
-│   ├── tired-syntax/    lexer, parser, AST, diagnostics, pretty-printer  (no deps)
-│   ├── tired-compiler/  types, checker, IR, optimizer, request-cost      (no deps)
-│   ├── tired-runtime/   eval, mock + HTTP engines, wave executor, contracts,
+│   ├── hale-syntax/    lexer, parser, AST, diagnostics, pretty-printer  (no deps)
+│   ├── hale-compiler/  types, checker, IR, optimizer, request-cost      (no deps)
+│   ├── hale-runtime/   eval, mock + HTTP engines, wave executor, contracts,
 │   │                    schema inference, record/replay, HTTP server
-│   ├── tired-lsp/       LSP server over stdio (diagnostics, completion, hover)
-│   ├── tired-py/        Python bindings (PyO3 / maturin)
-│   └── tired-cli/       the `tired` command-line driver
+│   ├── hale-lsp/       LSP server over stdio (diagnostics, completion, hover)
+│   ├── hale-py/        Python bindings (PyO3 / maturin)
+│   └── hale-cli/       the `hale` command-line driver
 ├── editors/vscode/      VS Code extension (grammar + LSP client)
-├── examples/            runnable .tired programs (live + offline)
+├── examples/            runnable .hale programs (live + offline)
 └── docs/                DESIGN.md and the formal grammar (grammar.ebnf)
 ```
 
@@ -309,56 +365,62 @@ tired/
 ## Run it
 
 ```bash
-cargo build                              # builds the `tired` binary
-alias tired="cargo run -q -p tired-cli --"
+cargo build                              # builds the `hale` binary
+alias hale="cargo run -q -p hale-cli --"
 
 # Offline (no network) — the mock engine + test blocks:
-tired check   examples/broken.tired      # see the compiler reject bad code
-tired test    examples/mocked.tired      # pipeline + contracts, all mocked
-tired test    examples/error_handling.tired
-tired explain examples/parallel.tired    # show the inferred parallel plan
-tired fmt     examples/mocked.tired      # canonical formatting
+hale check   examples/broken.hale      # see the compiler reject bad code
+hale test    examples/mocked.hale      # pipeline + contracts, all mocked
+hale test    examples/error_handling.hale
+hale explain examples/parallel.hale    # show the inferred parallel plan
+hale fmt     examples/mocked.hale      # canonical formatting
 
 # Live (uses the public GitHub API):
-tired run examples/parallel.tired --show-plan --metrics
-tired run examples/github_dashboard.tired --flow Dashboard octocat
+hale run examples/parallel.hale --show-plan --metrics
+hale run examples/github_dashboard.hale --flow Dashboard octocat
 
-# Schema inference — generate TIRED types from any JSON:
-tired inspect https://api.github.com/users/octocat User
+# Schema inference — generate hale types from any JSON:
+hale inspect https://api.github.com/users/octocat User
 
 # Time-travel: record once (live), then replay forever (offline, deterministic):
-tired run    examples/parallel.tired --record session.json
-tired replay session.json examples/parallel.tired
+hale run    examples/parallel.hale --record session.json
+hale replay session.json examples/parallel.hale
 
-# server mode — TIRED as an API gateway (handlers auto-parallelize their upstreams):
-tired explain examples/gateway.tired     # plan + request cost, no network
-tired serve   examples/gateway.tired     # serve it on http://127.0.0.1:8088/api/...
+# server mode — hale as an API gateway (handlers auto-parallelize their upstreams):
+hale explain examples/gateway.hale     # plan + request cost, no network
+hale serve   examples/gateway.hale     # serve it on http://127.0.0.1:8088/api/...
+
+# Compile-time SLA + secret-leak prevention:
+hale explain examples/sla.hale         # cost incl. critical-path hops + declared budget
+hale check   examples/sla.hale         # budget met, no secret leaks → type-checks
 
 # Language server (point your editor's LSP client at this):
-tired lsp
+hale lsp
 ```
 
 From **Python** (PyO3 bindings):
 
 ```bash
-pip install maturin && (cd crates/tired-py && maturin develop)
-python -c "import tired; print(tired.inspect('{\"id\":1}', 'User'))"
+pip install maturin && (cd crates/hale-py && maturin develop)
+python -c "import hale; print(hale.inspect('{\"id\":1}', 'User'))"
 ```
 
 Run the test suite and the benchmark:
 
 ```bash
 cargo test --workspace
-cargo test -p tired-runtime --test integration benchmark -- --nocapture
+cargo test -p hale-runtime --test integration benchmark -- --nocapture
 ```
 
 ---
 
 ## A note on the name
 
-`TIRED` is a backronym — *The Internet Request & Execution Domain-language* — and a small joke: every
-other way to consume an API is a little tiring. The language can't fix the internet, but it can make
-the compiler do the boring, error-prone parts for you.
+***hale*** *(adjective)* — free from defect, disease, or infirmity; sound, robust, *hale and hearty*.
+It doubles as a backronym, **H**TTP **A**PI **L**anguage & **E**ngine. The bet of the project is in the
+word: consuming an API is usually a little exhausting — manual concurrency, forgotten error checks,
+mystery latency, leaked tokens. hale moves that work into the compiler so what you ship comes out
+*robust by construction*.
 
 ---
 

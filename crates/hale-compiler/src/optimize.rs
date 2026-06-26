@@ -1,4 +1,4 @@
-//! The optimizer — TIRED's flagship passes:
+//! The optimizer — hale's flagship passes:
 //!
 //! * **Request deduplication (CSE).** Two `fetch`es that issue the *identical* request
 //!   (same endpoint, path, params, pipeline — and the same inputs) are collapsed: the
@@ -10,10 +10,10 @@
 //!   so the executor runs a whole wave concurrently — turning sequentially-written
 //!   fetches into a parallel schedule without the programmer asking.
 
-use tired_syntax::ast::{Expr, PathSeg};
-use tired_syntax::diag::{Diagnostic, Diagnostics};
-use tired_syntax::pretty;
-use tired_syntax::span::Spanned;
+use hale_syntax::ast::{Expr, PathSeg};
+use hale_syntax::diag::{Diagnostic, Diagnostics};
+use hale_syntax::pretty;
+use hale_syntax::span::Spanned;
 
 use crate::ir::*;
 
@@ -212,7 +212,7 @@ fn schedule_waves(body: &mut Body) {
     body.waves = waves;
 }
 
-// ---------- execution-plan rendering (`tired explain` / `--show-plan`) ----------
+// ---------- execution-plan rendering (`hale explain` / `--show-plan`) ----------
 
 /// Render a human-readable execution plan showing the inferred parallel waves, and the
 /// static request-cost of each flow/route (max requests across all paths).
@@ -226,10 +226,11 @@ pub fn render_plan(main: &Body, flows: &[Flow], tests: &[Test], servers: &[Serve
     }
     for f in flows {
         out.push_str(&format!(
-            "\nflow {}({}):{}\n",
+            "\nflow {}({}):{}{}\n",
             f.name,
             f.params.join(", "),
-            cost_suffix(&f.body, flows)
+            cost_suffix(&f.body, flows),
+            budget_suffix(f.budget.as_ref())
         ));
         render_body_plan(&mut out, &f.body, 1);
     }
@@ -237,10 +238,11 @@ pub fn render_plan(main: &Body, flows: &[Flow], tests: &[Test], servers: &[Serve
         out.push_str(&format!("\nserver {}:\n", s.name));
         for r in &s.routes {
             out.push_str(&format!(
-                "  route {} {}:{}\n",
+                "  route {} {}:{}{}\n",
                 r.method,
                 render_path(&r.path),
-                cost_suffix(&r.body, flows)
+                cost_suffix(&r.body, flows),
+                budget_suffix(r.budget.as_ref())
             ));
             render_body_plan(&mut out, &r.body, 2);
         }
@@ -255,11 +257,35 @@ pub fn render_plan(main: &Body, flows: &[Flow], tests: &[Test], servers: &[Serve
 fn cost_suffix(body: &Body, flows: &[Flow]) -> String {
     let c = crate::cost::request_cost(body, flows);
     format!(
-        "  [≤ {} request{}, up to {} in parallel]",
+        "  [≤ {} request{}, up to {} in parallel, {} hop{} deep]",
         c.max_requests,
         if c.max_requests == 1 { "" } else { "s" },
-        c.max_parallel
+        c.max_parallel,
+        c.depth,
+        if c.depth == 1 { "" } else { "s" },
     )
+}
+
+/// Render a ` budget(...)` annotation in the plan when a flow/route declares an SLA.
+fn budget_suffix(budget: Option<&hale_syntax::ast::Budget>) -> String {
+    let Some(b) = budget else {
+        return String::new();
+    };
+    let mut parts = Vec::new();
+    if let Some(r) = b.requests {
+        parts.push(format!("requests ≤ {r}"));
+    }
+    if let Some(p) = b.parallel {
+        parts.push(format!("parallel ≤ {p}"));
+    }
+    if let Some(h) = b.hops {
+        parts.push(format!("hops ≤ {h}"));
+    }
+    if parts.is_empty() {
+        String::new()
+    } else {
+        format!("  (budget: {})", parts.join(", "))
+    }
 }
 
 fn render_body_plan(out: &mut String, body: &Body, indent: usize) {
@@ -333,7 +359,7 @@ mod tests {
     use crate::lower::lower_program;
 
     fn compile(src: &str) -> (Body, Vec<Flow>, Vec<Test>, Diagnostics) {
-        let (prog, d) = tired_syntax::parse(src);
+        let (prog, d) = hale_syntax::parse(src);
         assert!(!d.has_errors(), "parse error: {}", d.render(src, "t"));
         let (mut main, mut flows, mut tests, mut servers) = lower_program(&prog);
         let diags = optimize(&mut main, &mut flows, &mut tests, &mut servers);
