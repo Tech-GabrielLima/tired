@@ -1,0 +1,32 @@
+// Showcases the full pipeline operator set, fully offline via a mock.
+// Run: hale test examples/pipeline.hale
+
+endpoint API { base: "https://example.com" }
+
+mock API {
+  GET /nums -> [ { v: 3 }, { v: 1 }, { v: 3 }, { v: 2 }, { v: 1 } ]
+}
+
+test "pipeline operators" {
+  using mock API
+
+  // sort desc, project the field, dedup
+  fetch API /nums | sort(by: .v desc) | pluck(.v) | unique() -> vs
+  assert vs.length == 3
+
+  // terminal aggregations
+  fetch API /nums | sum(by: .v) -> total
+  assert total == 10
+  fetch API /nums | count() -> n
+  assert n == 5
+
+  // filter + reverse, then skip/take windowing
+  fetch API /nums | filter(x => x.v > 1) | reverse() -> big
+  assert big.length == 3
+  fetch API /nums | skip(2) | take(1) -> mid
+  assert mid.length == 1
+
+  // flatten is a no-op on a flat array
+  fetch API /nums | flatten() | count() -> flat
+  assert flat == 5
+}

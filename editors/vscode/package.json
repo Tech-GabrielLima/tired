@@ -1,37 +1,37 @@
 {
-  "name": "tired-lang",
-  "displayName": "TIRED",
-  "description": "Syntax highlighting and language server (live diagnostics, completion, hover) for the TIRED API-consumption language.",
+  "name": "hale-lang",
+  "displayName": "hale",
+  "description": "Syntax highlighting and language server (live diagnostics, completion, hover) for the hale API-consumption language.",
   "version": "0.1.0",
   "publisher": "gabriel-lima",
   "license": "MIT",
-  "repository": { "type": "git", "url": "https://github.com/Tech-GabrielLima/tired.git" },
+  "repository": { "type": "git", "url": "https://github.com/Tech-GabrielLima/hale.git" },
   "engines": { "vscode": "^1.75.0" },
   "categories": ["Programming Languages", "Linters"],
   "main": "./extension.js",
   "contributes": {
     "languages": [
       {
-        "id": "tired",
-        "aliases": ["TIRED", "tired"],
-        "extensions": [".tired"],
+        "id": "hale",
+        "aliases": ["hale", "hale"],
+        "extensions": [".hale"],
         "configuration": "./language-configuration.json"
       }
     ],
     "grammars": [
       {
-        "language": "tired",
-        "scopeName": "source.tired",
-        "path": "./syntaxes/tired.tmLanguage.json"
+        "language": "hale",
+        "scopeName": "source.hale",
+        "path": "./syntaxes/hale.tmLanguage.json"
       }
     ],
     "configuration": {
-      "title": "TIRED",
+      "title": "hale",
       "properties": {
-        "tired.serverPath": {
+        "hale.serverPath": {
           "type": "string",
-          "default": "tired",
-          "description": "Path to the `tired` binary used to launch the language server (`tired lsp`)."
+          "default": "hale",
+          "description": "Path to the `hale` binary used to launch the language server (`hale lsp`)."
         }
       }
     }

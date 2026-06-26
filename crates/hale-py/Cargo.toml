@@ -1,0 +1,22 @@
+[package]
+name = "hale-py"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Python bindings for hale — compile-check, run, inspect and JSON-Schema from Python"
+
+[lib]
+name = "hale"
+crate-type = ["cdylib"]
+
+[dependencies]
+hale-syntax.workspace = true
+hale-compiler.workspace = true
+hale-runtime.workspace = true
+tokio = { workspace = true }
+serde_json.workspace = true
+pyo3 = { version = "0.23", features = ["abi3-py38", "extension-module"] }
+
+[lints.clippy]
+all = "warn"

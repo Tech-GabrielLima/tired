@@ -1,0 +1,36 @@
+// Fully offline: `hale test examples/mocked.hale` exercises the pipeline, contracts
+// and the mock engine without touching the network.
+
+endpoint GitHub {
+  base: "https://api.github.com"
+  timeout: 5s
+}
+
+// A contract: a runtime-verified shape. `stars` must never be negative.
+contract Repo {
+  id:    Integer where (> 0)
+  name:  String  where (length in 1..100)
+  stars: Integer where (>= 0)
+}
+
+mock GitHub {
+  GET /users/{user}/repos -> [
+    { id: 1, name: "alpha", stars: 250 },
+    { id: 2, name: "beta",  stars: 12 },
+    { id: 3, name: "gamma", stars: 900 }
+  ]
+  GET /repos/999 -> NotFound
+}
+
+test "keeps only popular repos, most-starred first" {
+  using mock GitHub
+
+  fetch GitHub /users/gabriel/repos
+    | filter(repo => repo.stars > 100)
+    | sort(by: .stars desc)
+    | limit(5)
+    -> repos: Repo[]
+
+  assert repos.length == 2
+  assert repos.all(r => r.stars > 100)
+}

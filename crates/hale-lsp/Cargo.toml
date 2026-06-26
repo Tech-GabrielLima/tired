@@ -1,0 +1,15 @@
+[package]
+name = "hale-lsp"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Language Server for hale: live diagnostics, completion and hover over the LSP"
+
+[dependencies]
+hale-syntax.workspace = true
+hale-compiler.workspace = true
+serde_json.workspace = true
+
+[lints.clippy]
+all = "warn"

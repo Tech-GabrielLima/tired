@@ -1,28 +1,28 @@
 [workspace]
 resolver = "2"
 members = [
-    "crates/tired-syntax",
-    "crates/tired-compiler",
-    "crates/tired-runtime",
-    "crates/tired-lsp",
-    "crates/tired-cli",
-    "crates/tired-py",
+    "crates/hale-syntax",
+    "crates/hale-compiler",
+    "crates/hale-runtime",
+    "crates/hale-lsp",
+    "crates/hale-cli",
+    "crates/hale-py",
 ]
 
 [workspace.package]
-version = "0.1.0"
+version = "0.1.1"
 edition = "2021"
 rust-version = "1.82"
 license = "MIT"
 authors = ["Gabriel Lima"]
-repository = "https://github.com/gabriel/tired"
-description = "TIRED — a compiled domain-specific language for consuming HTTP APIs"
+repository = "https://github.com/Tech-GabrielLima/tired"
+description = "hale — a compiled domain-specific language for consuming HTTP APIs"
 
 [workspace.dependencies]
-tired-syntax = { path = "crates/tired-syntax" }
-tired-compiler = { path = "crates/tired-compiler" }
-tired-runtime = { path = "crates/tired-runtime" }
-tired-lsp = { path = "crates/tired-lsp" }
+hale-syntax = { path = "crates/hale-syntax" }
+hale-compiler = { path = "crates/hale-compiler" }
+hale-runtime = { path = "crates/hale-runtime" }
+hale-lsp = { path = "crates/hale-lsp" }
 
 # Runtime-only third-party deps. The compiler front-end (syntax + compiler crates)
 # is deliberately dependency-free std-only Rust; only the runtime touches the network.

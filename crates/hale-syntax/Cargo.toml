@@ -1,0 +1,10 @@
+[package]
+name = "hale-syntax"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "hale lexer, parser, AST and source diagnostics (zero dependencies)"
+
+[lints.clippy]
+all = "warn"

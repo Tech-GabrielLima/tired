@@ -238,6 +238,61 @@ dependencies = [
 ]
 
 [[package]]
+name = "hale-cli"
+version = "0.1.1"
+dependencies = [
+ "hale-compiler",
+ "hale-lsp",
+ "hale-runtime",
+ "hale-syntax",
+ "serde_json",
+ "tokio",
+]
+
+[[package]]
+name = "hale-compiler"
+version = "0.1.1"
+dependencies = [
+ "hale-syntax",
+]
+
+[[package]]
+name = "hale-lsp"
+version = "0.1.1"
+dependencies = [
+ "hale-compiler",
+ "hale-syntax",
+ "serde_json",
+]
+
+[[package]]
+name = "hale-py"
+version = "0.1.1"
+dependencies = [
+ "hale-compiler",
+ "hale-runtime",
+ "hale-syntax",
+ "pyo3",
+ "serde_json",
+ "tokio",
+]
+
+[[package]]
+name = "hale-runtime"
+version = "0.1.1"
+dependencies = [
+ "hale-compiler",
+ "hale-syntax",
+ "reqwest",
+ "serde_json",
+ "tokio",
+]
+
+[[package]]
+name = "hale-syntax"
+version = "0.1.1"
+
+[[package]]
 name = "hashbrown"
 version = "0.17.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1053,61 +1108,6 @@ name = "tinyvec_macros"
 version = "0.1.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1f3ccbac311fea05f86f61904b462b55fb3df8837a366dfc601a0161d0532f20"
-
-[[package]]
-name = "tired-cli"
-version = "0.1.0"
-dependencies = [
- "serde_json",
- "tired-compiler",
- "tired-lsp",
- "tired-runtime",
- "tired-syntax",
- "tokio",
-]
-
-[[package]]
-name = "tired-compiler"
-version = "0.1.0"
-dependencies = [
- "tired-syntax",
-]
-
-[[package]]
-name = "tired-lsp"
-version = "0.1.0"
-dependencies = [
- "serde_json",
- "tired-compiler",
- "tired-syntax",
-]
-
-[[package]]
-name = "tired-py"
-version = "0.1.0"
-dependencies = [
- "pyo3",
- "serde_json",
- "tired-compiler",
- "tired-runtime",
- "tired-syntax",
- "tokio",
-]
-
-[[package]]
-name = "tired-runtime"
-version = "0.1.0"
-dependencies = [
- "reqwest",
- "serde_json",
- "tired-compiler",
- "tired-syntax",
- "tokio",
-]
-
-[[package]]
-name = "tired-syntax"
-version = "0.1.0"
 
 [[package]]
 name = "tokio"

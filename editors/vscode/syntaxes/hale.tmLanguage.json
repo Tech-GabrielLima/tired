@@ -1,0 +1,100 @@
+{
+  "$schema": "https://raw.githubusercontent.com/martinring/tmlanguage/master/tmlanguage.json",
+  "name": "hale",
+  "scopeName": "source.hale",
+  "patterns": [
+    { "include": "#comments" },
+    { "include": "#strings" },
+    { "include": "#keywords" },
+    { "include": "#pipeline" },
+    { "include": "#constants" },
+    { "include": "#numbers" },
+    { "include": "#envvars" },
+    { "include": "#types" },
+    { "include": "#operators" }
+  ],
+  "repository": {
+    "comments": {
+      "patterns": [
+        { "name": "comment.line.double-slash.hale", "match": "//.*$" }
+      ]
+    },
+    "keywords": {
+      "patterns": [
+        {
+          "name": "keyword.control.hale",
+          "match": "\\b(match|return|then|retry|wait|using|assert|parallel)\\b"
+        },
+        {
+          "name": "keyword.declaration.hale",
+          "match": "\\b(endpoint|flow|type|contract|mock|test|let|log|fetch|params|import|schema)\\b"
+        },
+        {
+          "name": "keyword.operator.word.hale",
+          "match": "\\b(and|or|not|in|by|asc|desc|where)\\b"
+        }
+      ]
+    },
+    "pipeline": {
+      "patterns": [
+        {
+          "name": "support.function.pipeline.hale",
+          "match": "\\b(filter|map|pluck|sort|limit|take|skip|reverse|unique|flatten|count|sum)\\b"
+        }
+      ]
+    },
+    "constants": {
+      "patterns": [
+        { "name": "constant.language.hale", "match": "\\b(true|false|null)\\b" }
+      ]
+    },
+    "numbers": {
+      "patterns": [
+        {
+          "name": "constant.numeric.duration.hale",
+          "match": "\\b[0-9]+(ms|s|m|min|h|hr|d|sec)\\b"
+        },
+        {
+          "name": "constant.numeric.hale",
+          "match": "\\b[0-9]+(\\.[0-9]+)?\\b"
+        }
+      ]
+    },
+    "envvars": {
+      "patterns": [
+        { "name": "variable.other.env.hale", "match": "\\$[A-Za-z_][A-Za-z0-9_]*" }
+      ]
+    },
+    "types": {
+      "patterns": [
+        { "name": "entity.name.type.hale", "match": "\\b[A-Z][A-Za-z0-9_]*\\b" }
+      ]
+    },
+    "operators": {
+      "patterns": [
+        { "name": "keyword.operator.hale", "match": "->|=>|\\||==|!=|<=|>=|<|>|\\+|-|\\*|=|\\?|\\.\\." }
+      ]
+    },
+    "strings": {
+      "name": "string.quoted.double.hale",
+      "begin": "\"",
+      "end": "\"",
+      "patterns": [
+        { "name": "constant.character.escape.hale", "match": "\\\\." },
+        {
+          "name": "meta.interpolation.hale",
+          "begin": "\\{",
+          "end": "\\}",
+          "beginCaptures": { "0": { "name": "punctuation.definition.interpolation.begin.hale" } },
+          "endCaptures": { "0": { "name": "punctuation.definition.interpolation.end.hale" } },
+          "patterns": [
+            { "include": "#envvars" },
+            { "include": "#numbers" },
+            { "include": "#types" },
+            { "name": "variable.other.hale", "match": "[A-Za-z_][A-Za-z0-9_]*" }
+          ]
+        }
+      ]
+    }
+  }
+}

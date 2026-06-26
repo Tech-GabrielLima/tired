@@ -1,0 +1,27 @@
+// Full HTTP verbs with request bodies — hale is a complete client, not just GET.
+// Run: hale test examples/mutations.hale
+
+endpoint Store {
+  base: "https://api.store.com"
+  auth: Bearer($STORE_TOKEN)
+}
+
+mock Store {
+  POST /orders          -> { id: 1, status: "created" }
+  GET  /orders/{id}     -> { id: $id, status: "created" }
+  PATCH /orders/{id}    -> { id: $id, status: "shipped" }
+}
+
+flow PlaceAndShip(item: String) -> Order {
+  // POST with a JSON body. The result feeds the next request, so hale runs them
+  // in order; mutations are never deduplicated, reordered or eliminated.
+  fetch POST Store /orders body { item: item, qty: 2 } -> created
+  fetch PATCH Store /orders/{created.id} body { status: "shipped" } -> shipped
+  return shipped
+}
+
+test "create then ship an order" {
+  using mock Store
+  PlaceAndShip("widget") -> result
+  assert result.status == "shipped"
+}
