@@ -1,6 +1,8 @@
 # TIRED — *The Internet Request & Execution Domain-language*
 
 > **Languages:** **English** · [Português](README.pt-BR.md)
+>
+> **Docs:** [Language Reference](docs/LANGUAGE.md) · [Design & internals](docs/DESIGN.md) · [Grammar (EBNF)](docs/grammar.ebnf)
 
 > **APIs are tired. So I built a language.**
 >
