@@ -1,0 +1,32 @@
+[build-system]
+requires = ["maturin>=1.5,<2"]
+build-backend = "maturin"
+
+[project]
+name = "hale"
+version = "0.1.1"
+description = "Python bindings for hale — a compiled DSL for consuming HTTP APIs (Rust core)"
+readme = "README.md"
+requires-python = ">=3.8"
+license = { text = "MIT" }
+authors = [{ name = "Gabriel Lima" }]
+keywords = ["http", "api", "dsl", "compiler", "rust", "parallel", "type-checker"]
+classifiers = [
+  "Development Status :: 3 - Alpha",
+  "Intended Audience :: Developers",
+  "License :: OSI Approved :: MIT License",
+  "Operating System :: OS Independent",
+  "Programming Language :: Rust",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3 :: Only",
+  "Topic :: Internet :: WWW/HTTP",
+  "Topic :: Software Development :: Compilers",
+]
+
+[project.urls]
+Homepage = "https://github.com/Tech-GabrielLima/tired"
+Repository = "https://github.com/Tech-GabrielLima/tired"
+
+[tool.maturin]
+# The cdylib's [lib] name is `hale`, so the import name is `hale`.
+features = ["pyo3/extension-module"]

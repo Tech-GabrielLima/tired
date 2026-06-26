@@ -1,7 +1,10 @@
 /target
 **/target
-*.tiredc
-session.tiredrc
+*.halec
+session.halerc
 __pycache__/
 *.pyc
 *.so
+# Python packaging build artifacts (maturin/twine)
+dist/
+*.egg-info/
