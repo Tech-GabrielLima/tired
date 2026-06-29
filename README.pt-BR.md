@@ -119,45 +119,145 @@ main:
 O pipeline também é rico: `filter` · `map`/`pluck` · `sort` · `limit`/`take` · `skip` · `reverse` ·
 `unique` · `flatten` · `count` · `sum`.
 
-### 7 · Um SLA em tempo de compilação — `budget(...)` 🚀
+### 4½ · Fusão de requisições / batching — vetorização para a rede 🧬
 
-Como o custo é conhecido estaticamente, você pode **afirmá-lo**. Anote um flow ou rota com um `budget` e
-o compilador se recusa a compilar se algum caminho puder excedê-lo:
+Se um endpoint declara uma regra `batch:`, o otimizador vai além da dedup: ele colapsa vários GETs que
+diferem **só no último segmento do path** numa *única* chamada batched, e faz o **scatter** do array de
+volta para cada binding pela chave de junção. N idas-e-voltas viram uma.
 
 ```hale
-flow Overview(id: String) -> Customer budget(requests: 3, parallel: 2, hops: 2) {
+endpoint GH { base: "..."  batch: param("ids") key(.id) }
+
+fetch GH /users/1 -> a   //   o otimizador funde estes três
+fetch GH /users/2 -> b   //   numa ÚNICA  GET /users?ids=1,2,3
+fetch GH /users/3 -> c   //   e faz o scatter do array por .id
+```
+
+```text
+$ hale explain examples/batch.hale
+  wave 1:
+    • fetch GH /users?ids=… [batched ×3] -> __batch_0
+  wave 2:
+    • scatter __batch_0.id (from batch) -> a / -> b / -> c
+```
+
+A análise de custo então reporta `≤ 1 request` em vez de 3 — a rede é chamada uma vez. Nenhuma
+biblioteca faz isso automaticamente; é loop fusion, para HTTP.
+
+### 7 · Um SLA em tempo de compilação — `budget(...)` 🚀
+
+Como o custo é conhecido estaticamente, você pode **afirmá-lo**. Anote um flow ou rota com um `budget` —
+sobre requisições, fan-out, hops do caminho crítico, **ou `p99` (latência de relógio)** — e o compilador
+se recusa a compilar se algum caminho puder excedê-lo:
+
+```hale
+endpoint Billing { base: "..."  latency: 120ms }     // latência declarada por hop
+
+flow Overview(id: String) -> Customer budget(requests: 3, parallel: 2, hops: 2, p99: 400ms) {
   fetch Billing /customers/{id} -> customer: Customer
   fetch Billing /customers/{customer.id}/invoices      | count() -> invoices
   fetch Billing /customers/{customer.id}/subscriptions | count() -> subs
-  log "{customer.email}: {invoices} invoices, {subs} subscriptions"
   return customer
 }
 ```
 
 ```text
-$ hale check examples/sla.hale
-error: flow `Overview` has a critical path of 3 sequential hops, over its budget of 2
-   = note: static request-cost analysis: sequential round-trips dominate latency
+$ hale explain examples/sla.hale
+flow Overview(id):  [≤ 3 requests, up to 2 in parallel, 2 hops deep, ~240ms critical path]
+                    (budget: requests ≤ 3, parallel ≤ 2, hops ≤ 2, p99 ≤ 400ms)
+  effects: reads {Billing}
 ```
 
-Um orçamento de performance que **vive no sistema de tipos**, garantido pelo compilador — não um painel
-que você olha depois do incidente. `hops` é a profundidade do caminho crítico: as idas-e-voltas
-*sequenciais*, que dominam a latência.
+`p99` é somado pelo caminho crítico a partir do `latency:` de cada endpoint; prometa uma latência que não
+pode provar (um hop sem `latency:`) e o compilador avisa. Um orçamento que **vive no sistema de tipos**,
+não um painel pós-incidente. O `hale explain` também imprime a **assinatura de efeito** provada
+(`reads {Billing}` / `reads+writes {…}`).
 
-### 8 · Ele não vaza seus segredos — `Secret` 🔒
+### 7½ · Detecção de N+1 — o bug de performance nº 1 de cliente, pego em tempo de compilação 🪤
 
-Marque um campo como `Secret` e o compilador o **rastreia pelo programa**. Um segredo pode fluir *para
-dentro* de uma requisição (é a função dele), mas se chegar a um `log` ou a uma resposta HTTP de saída, o
-programa não compila:
+Buscar uma lista e, num loop, buscar uma coisa por elemento — o **N+1 query**. A hale acha isso com uma
+**análise de fluxo de dados** de verdade: rastreia quais valores vieram da rede (o *1*) e quais derivam de
+um elemento do `for` (o *N*), propagando essa proveniência por `let`s, braços de `match` e loops aninhados.
+
+```hale
+fetch GH /users -> users: User[]
+for u in users {
+  fetch GH /users/{u.id}/repos -> repos   // ← uma requisição por usuário
+  log "{u.login}: {repos.length}"
+}
+```
 
 ```text
-$ hale check leak.hale
-error: secret value `card` must not appear in a log statement
-   = note: secret-leak analysis: values typed `Secret` are tracked into every sink
+$ hale check examples/nplus1.hale
+warning: N+1 query: `GH /users/{u.id}/repos` runs once per element of `users`
+$ hale explain examples/nplus1.hale
+flow Dashboard():  [unbounded requests — a fetch runs once per `for` element (N+1); …]
 ```
 
-Ele pega até o caso indireto — devolver de uma rota `server` um *registro inteiro* que apenas contém um
-campo `Secret` também é rejeitado. Prevenção de vazamento de PII/segredos em tempo de compilação.
+Ela enxerga através de uma indireção (`let id = u.id; fetch …/{id}`), reporta **loops aninhados** como
+`Nˆ2` e sinaliza à parte uma leitura **invariante no loop** ("tire daqui"). Dois níveis: o lint é um
+*aviso* (um N+1 sobre uma lista pequena pode ser aceitável), mas um fetch por elemento torna o
+[custo](#6--ele-te-diz-o-custo-de-requisições--antes-de-você-subir) **ilimitado** — então qualquer
+`budget(...)` naquele flow vira **erro de compilação**: você não pode prometer um limite que um loop
+estoura.
+
+E quando o endpoint permite, o compilador não só reclama — ele **conserta**. Veja §7¾.
+
+### 7¾ · …e então conserta — fusão de loop automática 🔧
+
+Se o endpoint por-elemento declara uma regra `batch:`, o otimizador **reescreve o loop**: tira o fetch
+de dentro, junta todas as chaves numa única chamada batched e troca o fetch interno por um *scatter* puro.
+`1 + N` viagens viram `1 + 1` — code motion de invariante de loop + batching, para a rede.
+
+```hale
+endpoint GH { base: "..."  batch: param("ids") key(.id) }
+fetch GH /users -> users: User[]
+for u in users {
+  fetch GH /users/{u.id} -> detail   // ← fundido automaticamente, sem aviso: o compilador hoista
+  log "{detail.login}"
+}
+```
+
+```text
+$ hale explain examples/loop_fusion.hale
+flow Logins():  [≤ 2 requests, up to 1 in parallel, 2 hops deep]   ← era ilimitado (N+1)
+  wave 2:  • fetch GH /users?ids=… [batched ×N, fused from loop] -> __loopbatch_0
+  wave 3:  • for u in … (per-element loop)
+             wave 1:  • scatter __loopbatch_0.id (from batch) -> detail
+```
+
+Um teste de runtime confirma que os três GETs por-elemento batem na rede **uma vez**.
+
+### 8 · Controle de fluxo de informação — governança de dados no compilador 🔒
+
+Rotule um campo como `PII` ou `Secret` e o compilador o **rastreia** num lattice `Public < PII < Secret`.
+Cada endpoint tem uma `clearance:` (o dado mais sensível que pode receber); um `log` ou resposta HTTP só
+tem clearance `Public`. O dado nunca pode fluir para um sink abaixo do seu rótulo:
+
+```hale
+type Customer { id: Integer  email: PII  card: Secret }
+endpoint Analytics { base: "..."  clearance: Public }   // recusa PII/Secret
+```
+
+```text
+$ hale check governance.hale
+error: `PII`-labelled value `email` must not flow to the request to `Analytics` (cleared for `Public`)
+```
+
+Um segredo ainda pode fluir *para dentro* de um endpoint que precisa dele (clearance não declarada = topo),
+e a checagem é transitiva. É GDPR / residência de dados / prevenção de vazamento, em tempo de compilação —
+o mesmo motor de taint, agora um lattice de fluxo de informação de Denning.
+
+### 9 · O compilador sabe quais escritas são seguras de repetir — `idempotent` ♻️
+
+Uma mutação nunca é reenviada silenciosamente. Mas marque-a `idempotent(key: …)` e o hale *prova* que
+repetir a escrita é seguro — reabilitando o retry e anexando um header `Idempotency-Key` (o modelo do
+Stripe). Nenhuma biblioteca diz *"este `POST` é seguro de repetir e aquele não"*. O hale diz, porque está
+no tipo.
+
+```hale
+fetch POST Billing /charges idempotent(key: order.id) body { ... } -> r
+```
 
 ---
 
@@ -173,13 +273,16 @@ otimizador explora**.
 | Chamadas independentes em paralelo **automaticamente** | ✗ (`gather` manual) | ✗ (`Promise.all` manual) | ✗ | **✓** |
 | **Não compila** se você ignorar um erro possível | ✗ | ✗ | ✗ | **✓** |
 | Requisições idênticas **dedupadas**; não usadas **removidas** | ✗ | ✗ | ✗ | **✓** |
+| GETs quase-idênticos **fundidos numa chamada batched** automaticamente | ✗ | ✗ | ✗ | **✓** |
 | Retry / backoff / timeout / cache como **config declarativa** | manual | manual | anotações | **✓** |
 | **Mocks** na linguagem + testes (offline, determinísticos) | libs à parte | libs à parte | parcial | **✓** |
 | **Record/replay** para execução offline determinística | ✗ | ✗ | ✗ | **✓** |
 | Validação de **contrato** das respostas em runtime | ✗ | ✗ | ✗ | **✓** |
 | **Inferência** de schema + export **JSON Schema** | ✗ | ✗ | ✗ | **✓** |
-| **Orçamento de requisições/latência** garantido *em tempo de compilação* | ✗ | ✗ | ✗ | **✓** |
-| **Prevenção de vazamento de segredos** (um `Secret` não chega a log/resposta) | ✗ | ✗ | ✗ | **✓** |
+| **Orçamento de requisições / latência (`p99`)** garantido *em tempo de compilação* | ✗ | ✗ | ✗ | **✓** |
+| **Detecção de N+1 + fusão de loop automática** — fetch por elemento é sinalizado *e* batched | ✗ | ✗ | ✗ | **✓** |
+| **Controle de fluxo de informação**: PII/Secret não chega a sink de menor clearance | ✗ | ✗ | ✗ | **✓** |
+| **Segurança de retry no tipo**: prova quais escritas são `idempotent` | ✗ | ✗ | ✗ | **✓** |
 | Um toolchain: type-check, `fmt`, LSP, plano de execução | n/a | n/a | n/a | **✓** |
 
 **Por que usar:** o compilador se recusa a deixar um erro sem tratamento, o otimizador transforma seu
@@ -198,14 +301,17 @@ prefiro dizer isso a entregar stubs vazios.
 
 | Construído e testado ✅ | Projetado, não implementado ⏳ |
 |---|---|
-| Lexer, parser, AST, diagnósticos estilo `rustc` (carets + "did you mean") | Bindings Java (JNI) |
-| Type system + checker: `Result` exaustivo, tipagem de campos, resolução | Plugin IntelliJ (a extensão VS Code já está pronta) |
-| IR + otimizador: **eliminação de requisições mortas**, **inferência de paralelismo**, **deduplicação** | Codegen WASM / nativo (LLVM), JIT adaptativo |
-| **Análise estática de custo** (máx. de chamadas, paralelismo e hops do caminho crítico) | Modo cluster distribuído, registry haleHub |
-| **SLA em tempo de compilação**: `budget(requests/parallel/hops)` garantido pela análise de custo | Cache distribuído via Redis |
-| **Análise de vazamento de segredos**: um `Secret` nunca chega a um log ou resposta | Import de schema OpenAPI / GraphQL |
+| Lexer, parser, AST, diagnósticos estilo `rustc` (carets + "did you mean") | Import OpenAPI/GraphQL → endpoints+tipos; export OpenAPI/SDK |
+| Type system + checker: `Result` exaustivo, tipagem de campos, resolução | Scheduling adaptativo guiado por profile (record/replay); paginação |
+| IR + otimizador: **eliminação de requisições mortas**, **inferência de paralelismo**, **deduplicação** | Execução de ondas distribuída; registry haleHub; cache Redis |
+| **Fusão/batching automático** (`/u/1`,`/u/2`→`/u?ids=1,2`, scatter por chave) | Fuzzing por propriedades a partir de contratos; tipos de frescor |
+| **Detecção de N+1** (fluxo de dados) **+ fusão de loop automática** (`for` fetch → 1 chamada batched) | Bindings Java (JNI); plugin IntelliJ; codegen WASM/LLVM, JIT |
+| **Análise estática de custo** (chamadas, paralelismo, hops do caminho crítico e latência `p99`) | |
+| **SLA em tempo de compilação**: `budget(requests/parallel/hops/p99)` garantido pela análise | |
+| **Controle de fluxo de informação**: lattice PII/Secret + `clearance` por endpoint | |
+| **Idempotência / retry-safety no tipo** (`idempotent(key:)`); **assinaturas de efeito** | |
 | Runtime concorrente: escalonador de ondas, HTTP/2, retry/backoff, timeout, auth bearer, cache TTL, métricas | |
-| **Verbos HTTP completos** (GET/POST/PUT/PATCH/DELETE) + body JSON; mutações nunca reordenadas/dedupadas/re-tentadas | |
+| **Verbos HTTP completos** (GET/POST/PUT/PATCH/DELETE) + body JSON; segurança de mutação | |
 | **Modo `server`** — serve rotas HTTP cujos handlers consomem APIs (auto-paralelizados) | |
 | **Mock engine** + blocos `test`; verificação de **contratos** em runtime | |
 | **Language server** + **extensão VS Code**; **bindings Python** (PyO3, pip) | |
@@ -216,13 +322,18 @@ prefiro dizer isso a entregar stubs vazios.
 
 ## Medido aqui
 
-`cargo test --workspace` → **59 testes + 1 doc-test, 0 falhas** em seis crates: lexer/parser, type
-checker (toda regra principal — incluindo **enforcement de budget** e **vazamento de segredos** — tem
-teste de aceitação e de rejeição), otimizador (paralelismo, eliminação, deduplicação, custo de
-requisições e hops do caminho crítico), testes end-to-end de runtime contra um servidor HTTP in-process —
-incluindo um **teste end-to-end do modo `server`** que sobe um gateway hale e verifica que ele agrega dois
-upstreams em paralelo —, inferência + export de JSON Schema, round-trip de record/replay e o language
-server. Os bindings Python (PyO3) compilam num módulo `abi3` e são exercitados a partir do Python.
+`cargo test --workspace` → **87 testes + 1 doc-test, 0 falhas** em seis crates: lexer/parser, type
+checker (toda regra principal — `Result` exaustivo, **controle de fluxo de informação**, **budget /
+`p99`**, **idempotência** — tem teste de aceitação e de rejeição), otimizador (paralelismo, eliminação,
+deduplicação, **fusão de requisições**, **fusão de loop automática**, custo de requisições, hops e latência
+do caminho crítico), **detecção de N+1** (1+N sobre lista buscada, detecção através de `let` intermediário,
+`Nˆ2` em loops aninhados, leituras invariantes de loop, a rejeição budget→ilimitado e a supressão quando o
+loop é auto-fundido), testes end-to-end de runtime contra um servidor HTTP in-process — incluindo um
+**teste de fusão de loop** que verifica que um `for` por-elemento colapsa numa única chamada batched, um
+**teste de laço `for`** que verifica o fan-out por elemento e um **teste end-to-end do modo `server`** que
+sobe um gateway hale e verifica que ele agrega dois upstreams em paralelo —, inferência + export de JSON
+Schema, round-trip de record/replay e o language server. Os bindings Python (PyO3) compilam num módulo
+`abi3` e são exercitados a partir do Python.
 
 ### Benchmark de inferência de paralelismo
 

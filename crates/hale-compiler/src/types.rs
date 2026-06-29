@@ -73,11 +73,53 @@ impl Type {
         matches!(self, Type::Semantic(n) if n == "Secret")
     }
 
+    /// The information-flow label intrinsic to this *scalar* type. Composite types
+    /// (records/arrays) take the max over what they carry — see the checker's `worst_label`.
+    pub fn intrinsic_label(&self) -> Label {
+        match self {
+            Type::Semantic(n) if n == "Secret" => Label::Secret,
+            Type::Semantic(n) if n == "PII" => Label::Pii,
+            _ => Label::Public,
+        }
+    }
+
     /// The element type if this is an array (peeling an outer optional).
     pub fn element(&self) -> Option<Type> {
         match self {
             Type::Array(t) => Some((**t).clone()),
             Type::Optional(t) => t.element(),
+            _ => None,
+        }
+    }
+}
+
+/// An information-flow sensitivity label, ordered from least to most sensitive
+/// (`Public < Pii < Secret`). Data may flow to a sink only if the sink's *clearance*
+/// is at least the data's label — the classic Denning information-flow lattice, here
+/// enforced at compile time. An endpoint's clearance defaults to `Secret` (it accepts
+/// anything, e.g. the bearer token it needs); declaring `clearance: Public` restricts it.
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug)]
+pub enum Label {
+    Public,
+    Pii,
+    Secret,
+}
+
+impl Label {
+    pub fn name(self) -> &'static str {
+        match self {
+            Label::Public => "Public",
+            Label::Pii => "PII",
+            Label::Secret => "Secret",
+        }
+    }
+
+    /// Parse a clearance/label name as written in source (`clearance: Public`, `card: Secret`).
+    pub fn parse(name: &str) -> Option<Label> {
+        match name {
+            "Public" => Some(Label::Public),
+            "PII" => Some(Label::Pii),
+            "Secret" => Some(Label::Secret),
             _ => None,
         }
     }
@@ -151,7 +193,7 @@ impl TypeTable {
             "Null" => Type::Null,
             "Duration" => Type::Duration,
             "Url" | "Email" | "UUID" | "Uuid" | "DateTime" | "Date" | "Status" | "Time"
-            | "Secret" => Type::Semantic(n.to_string()),
+            | "Secret" | "PII" => Type::Semantic(n.to_string()),
             _ if self.is_record(n) => Type::Record(n.to_string()),
             _ => Type::Unknown,
         }

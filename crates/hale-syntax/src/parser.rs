@@ -156,6 +156,7 @@ impl Parser {
                     | TokenKind::Let
                     | TokenKind::Log
                     | TokenKind::Parallel
+                    | TokenKind::For
             ) {
                 return;
             }
@@ -354,24 +355,38 @@ impl Parser {
             self.expect(TokenKind::Colon)?;
             let val_span = self.cur_span();
             let value = self.parse_expr()?;
-            let n = match value {
-                Expr::Int(i, _) if i >= 0 => i as u64,
-                _ => {
-                    return self.err(
-                        val_span,
-                        "a budget value must be a non-negative integer (e.g. `requests: 3`)",
-                    )
-                }
-            };
             match key.node.as_str() {
-                "requests" => b.requests = Some(n),
-                "parallel" => b.parallel = Some(n),
-                "hops" => b.hops = Some(n),
+                "p99" => {
+                    let ms = match value {
+                        Expr::Duration(ms, _) => ms,
+                        _ => {
+                            return self
+                                .err(val_span, "`p99` must be a duration (e.g. `p99: 250ms`)")
+                        }
+                    };
+                    b.p99_ms = Some(ms);
+                }
+                "requests" | "parallel" | "hops" => {
+                    let n = match value {
+                        Expr::Int(i, _) if i >= 0 => i as u64,
+                        _ => {
+                            return self.err(
+                                val_span,
+                                "a budget count must be a non-negative integer (e.g. `requests: 3`)",
+                            )
+                        }
+                    };
+                    match key.node.as_str() {
+                        "requests" => b.requests = Some(n),
+                        "parallel" => b.parallel = Some(n),
+                        _ => b.hops = Some(n),
+                    }
+                }
                 other => {
                     return self.err(
                         key.span,
                         format!(
-                            "unknown budget field `{other}` (expected `requests`, `parallel`, or `hops`)"
+                            "unknown budget field `{other}` (expected `requests`, `parallel`, `hops`, or `p99`)"
                         ),
                     )
                 }
@@ -548,6 +563,25 @@ impl Parser {
                     span: start.merge(self.prev),
                 })
             }
+            TokenKind::For => {
+                let start = self.cur_span();
+                self.bump(); // for
+                let var = self.take_ident()?;
+                self.expect(TokenKind::In)?;
+                // The iterable is followed by the body `{`; suppress record-literal parsing
+                // so the block is not eaten as a record (same trick as a `match` scrutinee).
+                let saved = self.no_record;
+                self.no_record = true;
+                let iter = self.parse_expr()?;
+                self.no_record = saved;
+                let body = self.parse_block()?;
+                Ok(Stmt::ForEach {
+                    var,
+                    iter,
+                    body,
+                    span: start.merge(self.prev),
+                })
+            }
             TokenKind::Return => {
                 let start = self.cur_span();
                 self.bump();
@@ -616,6 +650,20 @@ impl Parser {
         let endpoint = self.take_ident()?;
         let path = self.parse_path()?;
 
+        // Optional `idempotent(key: <expr>)` — marks a mutation safe to auto-retry.
+        let idempotency_key = if self.at(&TokenKind::Idempotent) {
+            self.bump();
+            self.expect(TokenKind::LParen)?;
+            // `key:` is conventional; accept it as a leniently-named field.
+            let _field = self.take_name_lenient()?;
+            self.expect(TokenKind::Colon)?;
+            let key = self.parse_expr()?;
+            self.expect(TokenKind::RParen)?;
+            Some(key)
+        } else {
+            None
+        };
+
         // Optional request body: `body <expr>`.
         let body = if self.ident_text() == Some("body") {
             self.bump();
@@ -645,16 +693,17 @@ impl Parser {
         } else {
             None
         };
-        Ok(Stmt::Fetch(FetchStmt {
+        Ok(Stmt::Fetch(Box::new(FetchStmt {
             method,
             endpoint,
             path,
             params,
             body,
+            idempotency_key,
             pipeline,
             bind,
             span: start.merge(self.prev),
-        }))
+        })))
     }
 
     fn parse_binding(&mut self) -> PResult<Binding> {
@@ -1414,6 +1463,24 @@ mod tests {
             }
             log "user {user.login} has data"
         "#);
+    }
+
+    #[test]
+    fn parses_for_loop() {
+        let p = ok(r#"
+            fetch GitHub /users/gabriel/repos -> repos
+            for repo in repos {
+                fetch GitHub /repos/{repo.id}/commits -> commits
+                log "{repo.name}: {commits.length}"
+            }
+        "#);
+        match &p.items[1] {
+            Item::Stmt(Stmt::ForEach { var, body, .. }) => {
+                assert_eq!(var.node, "repo");
+                assert_eq!(body.stmts.len(), 2);
+            }
+            other => panic!("expected a for loop, got {other:?}"),
+        }
     }
 
     #[test]

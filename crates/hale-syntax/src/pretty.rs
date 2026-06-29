@@ -118,6 +118,9 @@ fn budget_clause(b: &Budget) -> String {
     if let Some(h) = b.hops {
         parts.push(format!("hops: {h}"));
     }
+    if let Some(ms) = b.p99_ms {
+        parts.push(format!("p99: {ms}ms"));
+    }
     if parts.is_empty() {
         String::new()
     } else {
@@ -148,6 +151,9 @@ fn stmt(s: &Stmt, indent: usize) -> String {
                 format!("{} ", f.method)
             };
             let mut out = format!("{p}fetch {method}{} {}", f.endpoint.node, path(&f.path));
+            if let Some(k) = &f.idempotency_key {
+                out.push_str(&format!(" idempotent(key: {})", expr(k)));
+            }
             if let Some(b) = &f.body {
                 out.push_str(&format!(" body {}", expr(b)));
             }
@@ -172,6 +178,14 @@ fn stmt(s: &Stmt, indent: usize) -> String {
         Stmt::Parallel { block, .. } => {
             let mut out = format!("{p}parallel {{\n");
             out.push_str(&block_body(block, indent + 1));
+            out.push_str(&format!("{p}}}"));
+            out
+        }
+        Stmt::ForEach {
+            var, iter, body, ..
+        } => {
+            let mut out = format!("{p}for {} in {} {{\n", var.node, expr(iter));
+            out.push_str(&block_body(body, indent + 1));
             out.push_str(&format!("{p}}}"));
             out
         }

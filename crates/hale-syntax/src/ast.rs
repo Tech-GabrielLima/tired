@@ -56,6 +56,9 @@ pub struct Budget {
     /// Max **critical-path depth** — sequential request round-trips, the dominant
     /// factor in latency. Independent calls in one wave count as a single hop.
     pub hops: Option<u64>,
+    /// Max worst-case latency (ms) along the critical path, computed from each endpoint's
+    /// declared `latency:`. Written as a duration: `budget(p99: 250ms)`.
+    pub p99_ms: Option<u64>,
     pub span: Span,
 }
 
@@ -175,7 +178,8 @@ pub struct Block {
 
 #[derive(Clone, Debug)]
 pub enum Stmt {
-    Fetch(FetchStmt),
+    /// Boxed: `FetchStmt` is by far the largest statement variant.
+    Fetch(Box<FetchStmt>),
     Let {
         name: Name,
         value: Expr,
@@ -187,6 +191,14 @@ pub enum Stmt {
     },
     Parallel {
         block: Block,
+        span: Span,
+    },
+    /// `for <var> in <iter> { <body> }` — run the body once per element of the iterable.
+    /// The body executes for its effects (fetches, logs); `iter` is evaluated once.
+    ForEach {
+        var: Name,
+        iter: Expr,
+        body: Block,
         span: Span,
     },
     Return {
@@ -219,6 +231,9 @@ pub struct FetchStmt {
     pub params: Vec<(Name, Expr)>,
     /// Optional request body (`body <expr>`), sent as JSON.
     pub body: Option<Expr>,
+    /// `idempotent(key: <expr>)` — marks a mutation safe to auto-retry, attaching an
+    /// idempotency key. The compiler then treats this write as retry-safe.
+    pub idempotency_key: Option<Expr>,
     pub pipeline: Vec<PipelineOp>,
     pub bind: Option<Binding>,
     pub span: Span,

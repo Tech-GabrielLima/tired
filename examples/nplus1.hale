@@ -1,0 +1,39 @@
+// N+1 query detection — hale finds the most common API-client performance bug *at compile
+// time*: fetch a list, then issue one request per element. A data-flow analysis tracks which
+// values came from the network and which derive from a `for` element, so it catches the
+// pattern even through intermediate `let`s and nested loops.
+//
+//   hale check   examples/nplus1.hale   # warns: "N+1 query: ... runs once per element of `users`"
+//   hale explain examples/nplus1.hale   # the flow's request cost is reported as `unbounded`
+//   hale test    examples/nplus1.hale   # runs offline via the mock — and really fans out N times
+
+endpoint GH {
+  base: "https://api.github.com"
+}
+
+type User { id: Integer  login: String }
+
+mock GH {
+  GET /users            -> [ { id: 1, login: "torvalds" }, { id: 2, login: "octocat" } ]
+  GET /users/{id}/repos -> [ { id: 10, name: "linux" }, { id: 11, name: "subsurface" } ]
+}
+
+// ❌ The N+1 pattern. `users` is fetched (the "1"); then one `/repos` call fires per user
+//    (the "N"). hale warns, and — because the request count now scales with the response —
+//    its cost is `unbounded`, so adding `budget(requests: 10)` below would FAIL to compile.
+flow Dashboard() {
+  fetch GH /users -> users: User[]
+  for u in users {
+    fetch GH /users/{u.id}/repos -> repos
+    log "{u.login}: {repos.length} repos"
+  }
+}
+
+// ✅ The fix when the API supports it: declare a batch rule on the endpoint and fetch the
+//    related data in ONE call instead of one per element (see examples/batch.hale). Until the
+//    language can auto-fuse a loop, hoisting the fan-out into a single bulk request is the cure.
+
+test "the dashboard runs offline (and issues one repos call per user)" {
+  using mock GH
+  Dashboard()
+}

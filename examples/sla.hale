@@ -9,6 +9,7 @@ endpoint Billing {
   base:    "https://api.billing.com"
   auth:    Bearer($BILLING_KEY)
   timeout: 4s
+  latency: 120ms          // declared per-hop latency — lets the compiler bound the p99
 }
 
 // A `Secret` field is tracked from the response onward: it may flow INTO a request
@@ -23,7 +24,7 @@ type Customer {
 // `budget(...)` is a compile-time SLA. The cost analysis bounds the worst case across
 // every path; exceeding any declared field is a hard compile error. Here: at most 3
 // requests, at most 2 of them concurrent, and a critical path of 2 sequential hops.
-flow Overview(id: String) -> Customer budget(requests: 3, parallel: 2, hops: 2) {
+flow Overview(id: String) -> Customer budget(requests: 3, parallel: 2, hops: 2, p99: 400ms) {
   fetch Billing /customers/{id} -> customer: Customer
 
   // These two need `customer` first, but not each other — so the optimizer runs them

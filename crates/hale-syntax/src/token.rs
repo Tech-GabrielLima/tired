@@ -35,10 +35,12 @@ pub enum TokenKind {
     Server,
     Route,
     Budget,
+    Idempotent,
     Where,
     Retry,
     Wait,
     Then,
+    For,
     In,
     By,
     Asc,
@@ -125,10 +127,12 @@ impl TokenKind {
             Server => "server",
             Route => "route",
             Budget => "budget",
+            Idempotent => "idempotent",
             Where => "where",
             Retry => "retry",
             Wait => "wait",
             Then => "then",
+            For => "for",
             In => "in",
             By => "by",
             Asc => "asc",
@@ -178,10 +182,9 @@ impl TokenKind {
         use TokenKind::*;
         match self {
             Endpoint | Type | Contract | Flow | Fetch | Parallel | Match | Mock | Test | Using
-            | Assert | Let | Log | Return | Params | Server | Route | Budget | Where | Retry
-            | Wait | Then | In | By | Asc | Desc | And | Or | Not | True | False | Null => {
-                Some(self.symbol())
-            }
+            | Assert | Let | Log | Return | Params | Server | Route | Budget | Idempotent
+            | Where | Retry | Wait | Then | For | In | By | Asc | Desc | And | Or | Not | True
+            | False | Null => Some(self.symbol()),
             _ => None,
         }
     }
@@ -209,10 +212,12 @@ pub(crate) fn keyword(ident: &str) -> Option<TokenKind> {
         "server" => Server,
         "route" => Route,
         "budget" => Budget,
+        "idempotent" => Idempotent,
         "where" => Where,
         "retry" => Retry,
         "wait" => Wait,
         "then" => Then,
+        "for" => For,
         "in" => In,
         "by" => By,
         "asc" => Asc,

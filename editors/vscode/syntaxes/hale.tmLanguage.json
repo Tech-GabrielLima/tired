@@ -23,7 +23,7 @@
       "patterns": [
         {
           "name": "keyword.control.hale",
-          "match": "\\b(match|return|then|retry|wait|using|assert|parallel)\\b"
+          "match": "\\b(match|return|then|retry|wait|using|assert|parallel|for)\\b"
         },
         {
           "name": "keyword.declaration.hale",

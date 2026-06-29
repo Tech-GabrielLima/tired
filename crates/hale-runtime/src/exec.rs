@@ -95,6 +95,41 @@ impl Shared {
                         }
                         last_value = Some(v);
                     }
+                    NodeKind::ForEach(fe) => {
+                        // Evaluate the collection once, then run the (already-optimized) body
+                        // for each element with the loop variable bound. Iterations are
+                        // sequential; independent fetches *within* one iteration still run as
+                        // a parallel wave (the body has its own schedule). This is the very
+                        // shape the N+1 analysis flags — and it really issues N requests.
+                        let items = match eval(&fe.iter, env, None)? {
+                            Value::Array(a) => a,
+                            Value::Null => Vec::new(),
+                            other => vec![other],
+                        };
+                        for item in items {
+                            env.insert(fe.var.clone(), item);
+                            let r = Box::pin(self.run_body(&fe.body, env, active)).await?;
+                            // Propagate an explicit `return` out of the loop and its encloser.
+                            if fe.returns && r.is_some() {
+                                return Ok(r);
+                            }
+                        }
+                    }
+                    NodeKind::Scatter(s) => {
+                        // Pick this binding's element out of the batched array by join key.
+                        let want = eval(&s.value, env, None)?;
+                        let picked = match env.get(&s.batch) {
+                            Some(Value::Array(items)) => items
+                                .iter()
+                                .find(|el| el.get_field(&s.key_field) == want)
+                                .cloned()
+                                .unwrap_or(Value::Null),
+                            _ => Value::Null,
+                        };
+                        if let Some(b) = &node.binding {
+                            env.insert(b.clone(), picked);
+                        }
+                    }
                 }
             }
         }
@@ -246,9 +281,47 @@ impl Shared {
         for (k, e) in &f.params {
             query.push((k.clone(), eval(e, env, None)?.display()));
         }
+        // A fused batch fetch carries its ids: join them into the declared query parameter,
+        // e.g. `?ids=1,2,3`. Static fusion stores a fixed `ids` list; loop fusion stores a
+        // `mapped` source — a key expression evaluated over a collection at runtime.
+        // (An unfused candidate has neither and behaves as a plain GET.)
+        if let Some(b) = &f.batch {
+            let joined: Vec<String> = if let Some(m) = &b.mapped {
+                let items = match eval(&m.coll, env, None)? {
+                    Value::Array(a) => a,
+                    Value::Null => Vec::new(),
+                    other => vec![other],
+                };
+                // An empty collection means the loop would issue zero requests; send none
+                // and return an empty batch so the in-loop scatters all yield nothing.
+                if items.is_empty() {
+                    return Ok(Value::Array(Vec::new()));
+                }
+                let mut out = Vec::with_capacity(items.len());
+                for it in &items {
+                    let mut child = env.clone();
+                    child.insert(m.var.clone(), it.clone());
+                    out.push(eval(&m.key, &child, Some(it))?.display());
+                }
+                out
+            } else {
+                let mut out = Vec::with_capacity(b.ids.len());
+                for e in &b.ids {
+                    out.push(eval(e, env, None)?.display());
+                }
+                out
+            };
+            if !joined.is_empty() {
+                query.push((b.query_param.clone(), joined.join(",")));
+            }
+        }
 
         let body_json = match &f.body {
             Some(e) => Some(crate::record::value_to_json(&eval(e, env, None)?)),
+            None => None,
+        };
+        let idempotency_key = match &f.idempotency_key {
+            Some(e) => Some(eval(e, env, None)?.display()),
             None => None,
         };
 
@@ -278,7 +351,14 @@ impl Shared {
                 .ok_or_else(|| RunError::new(format!("unknown endpoint `{}`", f.endpoint)))?;
             let out = self
                 .http
-                .request(cfg, &f.method, &path, &query, body_json.as_ref())
+                .request(
+                    cfg,
+                    &f.method,
+                    &path,
+                    &query,
+                    body_json.as_ref(),
+                    idempotency_key.as_deref(),
+                )
                 .await;
             self.record.store(key, &out); // no-op unless in record mode
             out

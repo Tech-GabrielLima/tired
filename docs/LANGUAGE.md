@@ -192,6 +192,9 @@ settings:
 | `timeout` | `5s`, `800ms` | per-request timeout (a duration) |
 | `retry` | `3 backoff(exponential)` | retry count plus a backoff policy: `backoff(exponential)` or `backoff(constant)` |
 | `cache` | `ttl(5min)` | cache successful responses for the given TTL |
+| `clearance` | `Public` / `PII` / `Secret` | the most sensitive data this endpoint may receive — see [information-flow control](#information-flow-control). Undeclared ⇒ top (accepts anything). |
+| `latency` | `120ms` | declared per-hop latency, used to bound `budget(p99: …)` |
+| `batch` | `param("ids") key(.id)` | enables [request fusion](#request-fusion--batching): `GET /coll/{x}` groups fuse into `GET /coll?ids=…` and scatter by `.id` |
 
 Retries and caching apply **only to idempotent (GET/HEAD) requests** — see
 [mutation safety](#mutation-safety). An unknown endpoint name in a `fetch` is a compile
@@ -219,9 +222,10 @@ that `hale inspect` infers from samples:
 
 `Url` · `Email` · `DateTime` · `UUID`
 
-One semantic type is special: **`Secret`** marks a sensitive value (a token, card number,
-password). It behaves like a string, but the compiler tracks it so it can never reach a
-log or an HTTP response — see [secret-leak analysis](#secret-leak-analysis).
+Two semantic types are **information-flow labels**: **`PII`** and **`Secret`** mark sensitive
+values, ordered `Public < PII < Secret`. The compiler tracks them through the program and
+refuses to let them flow to a sink below their label — see
+[information-flow control](#information-flow-control).
 
 ### Composite types
 
@@ -296,6 +300,7 @@ Constraints surface in two places: `hale schema` turns them into JSON-Schema key
 
 ```
 fetch [METHOD] Endpoint /path
+      [idempotent(key: <expr>)]
       [body <expr>]
       [params { name: expr, ... }]
       { | pipeline_op }
@@ -319,6 +324,10 @@ fetch [METHOD] Endpoint /path
   fetch POST Store /orders body { item: item, qty: 2 } -> created
   ```
 
+- **`idempotent(key: <expr>)`** marks a *mutation* safe to auto-retry. By default a non-GET
+  is never re-sent; with this marker the runtime may retry it and attaches an
+  `Idempotency-Key` header from the key. On a GET it is redundant (a warning). See
+  [idempotency & retry-safety](#idempotency--retry-safety).
 - **`params { … }`** adds query-string parameters.
 - **`-> binding`** names the result; an optional type annotation opts the result into
   checking: `-> repos: Repo[]`, `-> user: User`, `-> r: Result<Charge, ApiError>`. A
@@ -527,12 +536,32 @@ blocks, and in `server` route handlers.
 | Return | `return [expr]` | return from a flow / route handler (an effect) |
 | Assert | `assert expr` | fail the enclosing test if false (an effect) |
 | Parallel | `parallel { … }` | a block whose statements are explicitly run concurrently |
+| For | `for v in expr { … }` | run the body once per element of `expr` (see below) |
 | Using mock | `using mock Name` | inside a test, route this endpoint's calls to a `mock` |
 | Expression | `expr [-> binding]` | evaluate an expression, optionally binding it (e.g. a flow call: `Dashboard("octocat") -> dash`) |
 
 Note that **automatic parallelism** ([§15](#parallel-inference)) usually makes an explicit
 `parallel` block unnecessary — the optimizer already runs independent fetches
 concurrently. `parallel` is there for when you want to state the intent explicitly.
+
+### For loops
+
+```hale
+fetch GitHub /users/{name}/repos -> repos: Repo[]
+for repo in repos {
+  fetch GitHub /repos/{repo.id}/commits -> commits   // ⚠ N+1 — hale warns (see §15)
+  log "{repo.name}: {commits.length} commits"
+}
+```
+
+`for v in collection { … }` binds `v` to the element type of `collection` and runs the
+body once per element. The collection is evaluated once; iterations are **sequential**, but
+independent fetches *within a single iteration* still parallelize (the body has its own wave
+schedule). A loop is an **effect** statement — it runs for its side effects (fetches, logs);
+there is no accumulator and no `break`/`continue`.
+
+Iterating and fetching per element is exactly the **N+1 query** pattern, which hale detects
+statically and reports — see *N+1 query detection* in [§15](#n1-query-detection).
 
 `log`, `return`, `assert`, flow calls, and `match` are **effect** statements: they are
 sequenced in program order relative to one another, so observable behavior (e.g. the order
@@ -565,7 +594,8 @@ Dashboard("octocat") -> dash
 - Parameters are `name: type`, comma-separated.
 - The optional `-> type` after the parameter list is the return type.
 - An optional **`budget(...)`** clause after the signature declares a compile-time SLA
-  (see [§15](#compile-time-budgets)): `flow F(...) -> T budget(requests: 5, hops: 2) { … }`.
+  (see [§15](#compile-time-budgets)):
+  `flow F(...) -> T budget(requests: 5, hops: 2, p99: 250ms) { … }`.
 - A flow's body is optimized independently: its own dependency graph is scheduled into
   waves, so a flow's internal fan-out parallelizes (here, `repos` and `followers` run
   concurrently because both depend only on `username`, not on each other).
@@ -754,6 +784,49 @@ Two GETs that issue the **identical** request — same endpoint, path, params, p
 the same inputs — are collapsed: the later one is rewritten into a `let` that reuses the
 first's result. The network is hit once. It is common-subexpression elimination for HTTP.
 
+### Request fusion / batching
+
+When an endpoint declares a `batch:` rule, the optimizer goes beyond dedup: GETs that differ
+**only in the last path segment** are fused into one *batched* request, and the array result
+is *scattered* back to each binding by a join key.
+
+```hale
+endpoint GH { base: "..."  batch: param("ids") key(.id) }
+
+fetch GH /users/1 -> a
+fetch GH /users/2 -> b      // → one GET /users?ids=1,2,3, then scatter by .id
+fetch GH /users/3 -> c
+```
+
+- `param("ids")` is the query parameter that carries the comma-joined ids; `key(.id)` is the
+  response-element field each id is matched against when scattering.
+- The collection path (`/users`) is **inferred** as the common prefix of the group; fetches
+  fuse only when they share that prefix, are plain GETs (no pipeline/params), and each id is
+  available where the batch is placed.
+- Cost drops accordingly — the request-cost analysis reports `≤ 1 request` for the group.
+  Only GETs are fused; mutations are never batched. Constraints today: one batch convention
+  per endpoint, and fused fetches carry no pipeline.
+
+**Loop fusion (the same trick, applied to a `for` loop).** A per-element GET inside a `for`
+loop — the N+1 shape — is fused the same way: the fetch is *hoisted out* of the loop, every key
+is gathered into one batched call (the ids produced by mapping the key over the collection), and
+the in-loop fetch becomes a pure scatter. `1 + N` round-trips become `1 + 1`.
+
+```hale
+endpoint GH { base: "..."  batch: param("ids") key(.id) }
+fetch GH /users -> users: User[]
+for u in users {
+  fetch GH /users/{u.id} -> detail   // hoisted into one GET /users?ids=…, scattered by .id
+  log "{detail.login}"
+}
+```
+
+The fetch fuses when the endpoint declares `batch:`, its last path segment is the loop element,
+and its collection prefix is loop-invariant (uses no loop variable / loop-local). The N+1
+disappears from the cost — the body goes from `unbounded` back to a bounded request count — and
+the optimizer reports the rewrite. Nested loops fuse per innermost level. See
+*N+1 query detection* in [§15](#n1-query-detection).
+
 ### Mutation safety
 
 A non-GET fetch is a **mutation**, treated as an effect. The optimizer therefore **never**
@@ -786,15 +859,16 @@ off the IR.
 ### Compile-time budgets
 
 Because the cost is known statically, a flow or route can **declare** it and have the
-compiler enforce it. A `budget(...)` clause names any of three bounds; if the worst-case
+compiler enforce it. A `budget(...)` clause names any of four bounds; if the worst-case
 analysis exceeds one, the program does not compile:
 
 ```hale
-flow Overview(id: String) -> Customer budget(requests: 3, parallel: 2, hops: 2) {
+endpoint Billing { base: "..."  latency: 120ms }
+
+flow Overview(id: String) -> Customer budget(requests: 3, parallel: 2, hops: 2, p99: 400ms) {
   fetch Billing /customers/{id}                        -> customer: Customer
   fetch Billing /customers/{customer.id}/invoices      | count() -> invoices
   fetch Billing /customers/{customer.id}/subscriptions | count() -> subs
-  log "{customer.email}: {invoices} invoices, {subs} subscriptions"
   return customer
 }
 ```
@@ -804,6 +878,12 @@ flow Overview(id: String) -> Customer budget(requests: 3, parallel: 2, hops: 2) 
 | `requests: N` | total network calls on any path | `max_requests` |
 | `parallel: K` | concurrent calls in the widest wave | `max_parallel` |
 | `hops: M` | sequential round-trips on the critical path | `hops` (depth) |
+| `p99: <dur>` | worst-case wall-clock latency of the critical path | sum of per-hop `latency:` |
+
+`p99` is the critical-path latency: along the longest dependency chain, each wave contributes
+the slowest member's declared `latency:`, and the waves' latencies add. If any hop on the path
+has no declared `latency:`, the bound is *unknown* and a declared `p99` is a compile error
+("latency cannot be bounded") — you can only promise a latency you can prove.
 
 ```text
 error: flow `Overview` has a critical path of 3 sequential hops, over its budget of 2
@@ -813,26 +893,109 @@ error: flow `Overview` has a critical path of 3 sequential hops, over its budget
 A performance SLA that is part of the program's type and enforced by the compiler — not a
 dashboard checked after an incident.
 
-### Secret-leak analysis
+### N+1 query detection
 
-A field declared `Secret` is **tracked** from the response onward. It may flow *into* a
-request (its purpose), but the program will not compile if it reaches an observable sink —
-a `log`, or an HTTP response returned from a `server` route:
+The most common API-client performance bug is the **N+1 query**: fetch a list, then issue
+one request *per element*. hale finds it at compile time with a **data-flow analysis** — not
+a syntactic guess. Walking each body it tracks two kinds of provenance, threaded through
+`let`s, `match` bindings and nested scopes:
+
+- **network-derived** — a value that came from a `fetch` (transitively). The fetched list is
+  the *1*.
+- **loop-tainted** — a value derived from an enclosing `for` element. A `fetch` whose URL,
+  params, or body reads a loop-tainted value runs once per element — the *N*.
 
 ```hale
-type Customer { id: Integer  email: Email  card: Secret }
+fetch GH /users -> users: User[]
+for u in users {
+  fetch GH /users/{u.id}/repos -> repos   // ← N+1
+  log "{u.login}: {repos.length}"
+}
+```
+```text
+warning: N+1 query: `GH /users/{u.id}/repos` runs once per element of `users`
+   = help: fetch the related data in one bulk request (declare `batch: param("ids") key(.id)`
+           on `GH` and request all ids together), or restructure to avoid the per-element call
+   = note: the classic 1+N: the collection was itself fetched, then one request fires per element
+```
+
+Because the analysis is data-flow, it sees through an intermediate binding
+(`let id = u.id; fetch …/{id}`) and reports **nested loops** as `Nˆ2` fan-out. A loop-body
+fetch that does *not* depend on the element is reported instead as a **loop-invariant
+request** ("hoist it out of the loop — the identical call is re-sent every iteration").
+
+Two tiers, by design:
+
+- **Lint (warning).** The detector always reports the pattern with a fix; the program still
+  compiles, because an N+1 is not always wrong (the list may be tiny).
+- **SLA (hard error).** A per-element fetch makes the request count scale with the input, so
+  the [static cost analysis](#static-request-cost-analysis) marks the body **unbounded**. Any
+  `budget(requests:/parallel:/hops:/p99:)` on that flow or route then *fails to compile* — you
+  cannot promise a bound a loop can blow. `hale explain` shows it too:
+
+```text
+flow Dashboard():  [unbounded requests — a fetch runs once per `for` element (N+1); …]
+```
+
+And when the endpoint declares a `batch:` rule and the shape is fusable, the compiler doesn't
+just warn — it **rewrites the loop** itself (see *Loop fusion* under
+[request fusion](#request-fusion--batching)). In that case the N+1 warning is suppressed (the
+problem is fixed) and the optimizer reports the fusion instead.
+
+### Information-flow control
+
+`PII` and `Secret` are **information-flow labels**, ordered `Public < PII < Secret`. The
+compiler tracks a labelled value (and any record/array that carries one, transitively) and
+refuses to let it flow to a **sink** below its label. The sinks and their clearance:
+
+| Sink | Clearance | So it rejects |
+|---|---|---|
+| a `log` statement | `Public` | any `PII`/`Secret` value |
+| an HTTP response (`return` in a `server` route) | `Public` | any `PII`/`Secret` value |
+| a `fetch` request (path/query/body) | the endpoint's `clearance:` (default top) | data above that clearance |
+
+An endpoint with no `clearance:` is cleared for `Secret` (top) — it accepts anything, so a
+bearer token or card number may legitimately flow *into* the API that needs it. Declaring
+`clearance: Public` (or `PII`) restricts it:
+
+```hale
+type Customer { id: Integer  email: PII  card: Secret }
+endpoint Analytics { base: "..."  clearance: Public }
 ```
 
 ```text
-error: secret value `card` must not appear in a log statement
-   = note: secret-leak analysis: values typed `Secret` are tracked into every sink
+error: `PII`-labelled value `email` must not flow to the request to `Analytics` (cleared for `Public`)
+   = note: information-flow control: a value's label may not exceed the sink's clearance
 ```
 
-The check is conservative and transitive: returning a *whole record* that merely contains
-a `Secret` field from a route is rejected too (`value `account` carries the secret field
-`token``). To expose a sanitized view, return a projection (a record literal / `map`)
-without the secret field. Compile-time PII/secret-leak prevention, from a language that
-knows where your data flows.
+This is the classic Denning information-flow lattice, enforced at compile time — GDPR /
+data-residency / secret-leak prevention rather than a post-incident audit. To send a sanitized
+view, project the safe fields (a record literal / `map`).
+
+### Idempotency & retry-safety
+
+A non-GET request is a mutation: by default the runtime **never** silently re-sends it. Marking
+it `idempotent(key: <expr>)` is a proof that repeating it is safe — the runtime may then retry
+it (under the endpoint's retry policy) and attaches an `Idempotency-Key` header built from the
+key. The marker is redundant on a GET (already retry-safe) and warns.
+
+```hale
+fetch POST Billing /charges idempotent(key: order.id) body { ... } -> r
+```
+
+So "which writes are safe to repeat" becomes a property of the program, not a comment.
+
+### Effect signatures
+
+`hale explain` prints, for each flow/route, a **proved effect signature** — the set of
+endpoints it can touch and whether any path mutates state — composed across flow calls:
+
+```text
+flow Charge(id):  [≤ 3 requests, ...]
+  effects: reads+writes {Analytics, EU_Billing, Store}
+```
+
+Capability information the compiler derives, rather than trusts.
 
 ---
 
@@ -971,6 +1134,11 @@ Deliberate boundaries that keep the implementation honest:
   schemas — are designed, not built.
 - **Expression-position `match` is synchronous.** A `match` used as a value can't fetch in
   its arms; lift it to a statement. Statement-level `match` is fully async.
+- **N+1 loop fusion is restricted to the simple shape.** A per-element GET fuses only when its
+  last path segment is the loop element and its collection prefix is loop-invariant; fetches
+  whose *prefix* varies per element, or whose key flows through a loop-local intermediate, are
+  detected (warned) but not rewritten. `for` loops are also effect-only: no accumulator, no
+  `break`/`continue`, and `return` inside a loop is not for breaking out of it.
 - **No division operator.** Arithmetic is `+`, `-`, `*`; richer numeric expression is out
   of scope for an API-consumption DSL.
 - **The runtime is a scheduling tree-walker, not a bytecode VM / JIT.** The optimizer's
@@ -984,9 +1152,9 @@ Deliberate boundaries that keep the implementation honest:
 ### Keywords
 
 ```
-endpoint  type  contract  flow  fetch  parallel  match  mock  test  using
-assert    let   log       return  params  server  route  budget  where  retry
-wait      then  in        by      asc     desc    and    or      not    true   false  null
+endpoint  type  contract  flow  fetch  parallel  match  mock  test  using   assert
+let       log   return    params  server  route  budget  idempotent  where  retry
+wait      then  for       in      by      asc     desc    and    or     not    true   false  null
 ```
 
 HTTP method words (`GET`, `POST`, `PUT`, `PATCH`, `DELETE`, `HEAD`, `OPTIONS`) are
@@ -1014,7 +1182,7 @@ structural and bind at the statement/clause level.
 ```
 String  Integer (Int)  Float  Bool  Duration  Null     -- scalars
 Url  Email  DateTime  UUID                              -- semantic refinements of String
-Secret                                                  -- tracked: can't reach a log/response
+PII  Secret                                             -- info-flow labels (Public < PII < Secret)
 T[]            -- array of T
 T?             -- optional T
 Result<T, E>   -- fallible: Ok(T) or an error in E

@@ -1,0 +1,28 @@
+// Information-flow control + idempotency — guarantees the compiler proves, not hopes.
+//
+//   hale check   examples/governance.hale   # type-checks: no illegal data flows
+//   hale explain examples/governance.hale   # effect signature + request cost per flow
+
+// Labels form a lattice  Public < PII < Secret.  An endpoint's `clearance:` is the most
+// sensitive data it may receive; undeclared endpoints accept anything (e.g. a bearer token).
+type Customer { id: Integer  email: PII  card: Secret }
+
+endpoint Store      { base: "https://store.example" }
+endpoint EU_Billing { base: "https://eu.billing.example"  clearance: PII  latency: 90ms }
+endpoint Analytics  { base: "https://an.example"          clearance: Public }
+
+// A retry-safe payment: the `idempotent(key:)` marker lets the runtime retry this POST
+// safely (it sends an Idempotency-Key header). Without it, hale never re-sends a mutation.
+flow Charge(id: String) -> Customer budget(requests: 3, hops: 2) {
+  fetch Store /customers/{id} -> c: Customer
+
+  // `c.card` is Secret; EU_Billing is cleared for PII — but a charge endpoint legitimately
+  // needs the card, so this endpoint would be declared `clearance: Secret` in practice.
+  // Here we send only the id (Public) plus the idempotency key.
+  fetch POST EU_Billing /charges idempotent(key: id) body { customer: id } -> receipt
+
+  // Analytics is Public: sending `c.email` (PII) here would NOT compile. We send the id.
+  fetch POST Analytics /events body { customer: id } -> _
+
+  return c
+}

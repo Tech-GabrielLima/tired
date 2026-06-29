@@ -67,13 +67,17 @@ impl HttpEngine {
         path: &str,
         query: &[(String, String)],
         body: Option<&serde_json::Value>,
+        idempotency_key: Option<&str>,
     ) -> Outcome {
         let url = format!("{}{}", cfg.base.trim_end_matches('/'), path);
         let key = cache_key(&url, query);
-        let idempotent = matches!(method, "GET" | "HEAD");
+        // Only true reads are cached. A request is *retry-safe* if it is a read OR it
+        // carries an idempotency key (a mutation the program proved safe to repeat).
+        let cacheable = matches!(method, "GET" | "HEAD");
+        let retry_safe = cacheable || idempotency_key.is_some();
         let verb = reqwest::Method::from_bytes(method.as_bytes()).unwrap_or(reqwest::Method::GET);
 
-        if idempotent && cfg.cache_ttl_ms.is_some() {
+        if cacheable && cfg.cache_ttl_ms.is_some() {
             if let Some(v) = self.cache_get(&key) {
                 self.metrics.cache_hits.fetch_add(1, Ordering::Relaxed);
                 return Outcome::Success(v);
@@ -87,6 +91,9 @@ impl HttpEngine {
             if let Some(b) = body {
                 req = req.json(b);
             }
+            if let Some(k) = idempotency_key {
+                req = req.header("Idempotency-Key", k);
+            }
             if let Some(ms) = cfg.timeout_ms {
                 req = req.timeout(Duration::from_millis(ms));
             }
@@ -98,14 +105,14 @@ impl HttpEngine {
                     let body = resp.text().await.unwrap_or_default();
                     if (200..300).contains(&status) {
                         let value = parse_body(&body);
-                        if idempotent {
+                        if cacheable {
                             if let Some(ttl) = cfg.cache_ttl_ms {
                                 self.cache_put(key.clone(), value.clone(), ttl);
                             }
                         }
                         return Outcome::Success(value);
                     }
-                    if idempotent && is_retryable(status) && attempt < cfg.retries {
+                    if retry_safe && is_retryable(status) && attempt < cfg.retries {
                         attempt += 1;
                         self.metrics.retries.fetch_add(1, Ordering::Relaxed);
                         tokio::time::sleep(backoff_delay(cfg.backoff, attempt)).await;
@@ -123,7 +130,7 @@ impl HttpEngine {
                     return Outcome::Failure(err);
                 }
                 Err(e) => {
-                    if idempotent && attempt < cfg.retries {
+                    if retry_safe && attempt < cfg.retries {
                         attempt += 1;
                         self.metrics.retries.fetch_add(1, Ordering::Relaxed);
                         tokio::time::sleep(backoff_delay(cfg.backoff, attempt)).await;

@@ -75,17 +75,21 @@ Four families of checks:
      `unhandled error`;
    - reading a field off a `Result` is rejected ("match it first");
    - a `match` on a `Result` must be **exhaustive** over `Ok` and the error domain.
-4. **Secret-leak (taint) analysis** — a value typed `Secret` (or a record/array carrying a `Secret`
-   field, found transitively) must never reach an observable **sink**: a `log`, or an HTTP response
-   `return`ed from a `server` route. The checker carries a small "sink" flag while typing those
-   expressions; a `Secret` read inside one is a hard error. A secret flowing *into* a request (a path
-   param, body, or `auth`) is fine — that is its purpose.
+4. **Information-flow control (taint lattice)** — `PII` and `Secret` are labels ordered
+   `Public < PII < Secret`. The checker carries a *clearance floor* `(Label, sink)` while typing the
+   expression that flows to a sink, and a value (or a record/array carrying a field, transitively) whose
+   `worst_label` exceeds the clearance is a hard error. The sinks: a `log` and a route's HTTP response
+   are cleared for `Public`; a `fetch` request is cleared for its endpoint's `clearance:` setting
+   (default top = `Secret`, so a token may flow into the API that needs it). This is the classic Denning
+   lattice — the same `worst_label`/sink machine, generalised from a single `Secret` boolean.
 
 ## 5. IR & lowering (`hale-compiler/ir.rs`, `lower.rs`)
 
-Each body (the top-level script, a flow, a `match`-arm block) lowers to a `Body`: a flat `Vec<Node>`.
-Expressions stay as their AST form — only *statements* become nodes. The key product of lowering is the
-**dependency graph**:
+Each body (the top-level script, a flow, a `match`-arm block, a `for`-loop body) lowers to a `Body`: a
+flat `Vec<Node>`. Expressions stay as their AST form — only *statements* become nodes. A `for v in c { … }`
+becomes a `ForEach` node carrying its own nested `Body` (a sub-schedule); its read set is `c`'s free vars
+plus the body's external reads (minus `v`), so the loop correctly depends on whatever produced the
+collection. The key product of lowering is the **dependency graph**:
 
 - For each node we compute the set of free variables it **reads** (a structural walk that excludes
   lambda parameters and pattern bindings).
@@ -96,13 +100,29 @@ Expressions stay as their AST form — only *statements* become nodes. The key p
 
 ## 6. Optimizer (`hale-compiler/optimize.rs`)
 
-Three passes over every body (recursing into `match` arms), in this order:
+Five passes over every body (recursing into `match` arms and `for`-loop bodies), in this order:
+
+- **Loop fusion (the N+1 cure).** A per-element GET to a `batch:`-enabled endpoint inside a `for`
+  loop — its last path segment the loop element, its prefix loop-invariant — is *hoisted out* of
+  the loop into one batched `Fetch` whose ids are a *mapped* source (`coll | map(var => key)`,
+  carried in `BatchSpec::mapped`), and the in-loop fetch is replaced by a pure `Scatter`. The loop
+  body's deps and the loop node's read set are recomputed; the freshly introduced `__loopbatch_N`
+  binding is named from a program-wide counter (nested bodies share the runtime environment, so a
+  per-body counter could collide). `1 + N` round-trips become `1 + 1`, and the cost analysis turns
+  the body from `unbounded` back to bounded. It is loop-invariant code motion + batching, for HTTP.
 
 - **Request deduplication (CSE).** Each fetch gets a *signature* — endpoint + path + params + pipeline
   (rendered via the pretty-printer, so it is span-insensitive) plus the producers of its inputs (its read
   set and dependency ids). Two fetches with equal signatures issue the identical request with the
   identical inputs, so the later one is rewritten into `let b = a` (reusing the first binding). Running
   before liveness means the rewrite keeps the first fetch alive. The result: the network is hit once.
+- **Request fusion / batching.** When an endpoint declares a `batch:` rule (stamped onto its fetch nodes
+  during lowering), GETs that differ only in the last path segment and share a collection prefix are
+  grouped. A group of ≥ 2 is rewritten — soundness permitting (every id must be available where the batch
+  is placed) — into one *batched* `Fetch` (`/coll?ids=v1,v2,…`, binding an internal `__batch_k`) plus one
+  `Scatter` node per original binding (pick the array element whose `key` equals that id). The node list
+  is rebuilt and dependency edges recomputed. It is loop fusion for the network; the cost analysis then
+  counts the group as a single request.
 - **Dead-request elimination.** Liveness is backward reachability from the observable (effect) nodes.
   Anything unreached is dead; a dead *fetch* is reported (zero bytes will be sent) and excluded from the
   schedule.
@@ -170,24 +190,43 @@ Three pieces of tooling reuse the core rather than re-implementing it.
   route's handler **through the same executor** — so a fan-out aggregation in a handler is parallelized and
   deduplicated for free. An API gateway whose concurrency the compiler writes.
 - **Static request-cost analysis (`cost.rs`).** Walking the optimized IR, it bounds, for a flow/route,
-  the number of network requests any path can issue, how many run in parallel, and the **critical-path
-  depth** (`hops`) — the number of *sequential* request rounds, computed from the wave schedule (requests
-  in one wave are a single hop; sequential waves add). A `match` takes the *max* over arms; a flow call
-  adds that flow's cost; recursion is broken. Surfaced by `hale explain`.
+  the number of network requests any path can issue, how many run in parallel, the **critical-path depth**
+  (`hops`) — sequential request rounds, computed from the wave schedule (requests in one wave are a single
+  hop; sequential waves add) — and the **critical-path latency** (`p99`), the same wave walk summing each
+  hop's declared `latency:` (unknown if any hop is undeclared). A `match` takes the *max* over arms; a flow
+  call adds that flow's cost; recursion is broken. Surfaced by `hale explain`.
 - **Compile-time budgets (`cost.rs::check_budgets`).** A `flow`/`route` may declare
-  `budget(requests: N, parallel: K, hops: M)`. After optimization the analyzed cost is compared to each
-  declared bound; exceeding one is a hard compile error. The SLA lives in the program, not a dashboard —
-  no client library can do this because it does not know your call graph at compile time.
+  `budget(requests: N, parallel: K, hops: M, p99: <dur>)`. After optimization the analyzed cost is compared
+  to each declared bound; exceeding one (or being unable to bound `p99`) is a hard compile error. A
+  per-element fetch inside a `for` loop makes the request count **unbounded** (a `ForEach` whose body issues
+  any request poisons `Cost::unbounded`), and then *any* declared budget is a hard error — you cannot promise
+  a bound an N+1 can blow. The SLA lives in the program, not a dashboard.
+- **N+1 query detection (`nplus1.rs`).** A standalone data-flow lint over the AST. It threads two taint
+  sets through `let`s, `match` bindings and nested scopes: *network-derived* (came from a `fetch`, the "1")
+  and *loop-tainted* (derived from an enclosing `for` element, the "N"). A `fetch` inside a loop whose
+  request inputs read a loop-tainted value is an **N+1** (warning, with a batch-the-collection fix); one
+  that reads nothing loop-tainted is a **loop-invariant** read (hoist it out). Nested loops are reported as
+  `Nˆ2`. It is a *warning*, not an error — the hard enforcement path is the budget→unbounded rule above.
+  When the loop is **auto-fusable** (the optimizer's loop fusion will rewrite it), the detector stays
+  silent — its fusability check is a deliberate *strict subset* of the optimizer's, so a suppressed
+  warning always corresponds to an actual fusion, never a hidden N+1.
+- **Effect signatures (`cost.rs::effects`).** The composed set of endpoints a flow/route can touch and
+  whether any path mutates, recursing through flow calls. Surfaced by `hale explain` (`reads {…}` /
+  `reads+writes {…}`) — proved capability information.
 - **Python bindings (`hale-py`, PyO3 abi3).** The compiler + runtime exposed to Python (`check`, `run`,
   `inspect`, `json_schema`, `explain`) as a single `abi3` wheel that works on CPython 3.8+.
 
-### Mutation safety
+### Mutation safety & idempotency
 
 Adding non-GET verbs forced a correctness decision the optimizer now encodes: a **mutation is an effect**.
 A non-GET fetch is marked as an effect node, which means it is never reordered, never deduplicated, never
 eliminated when its result is unused, and never auto-retried on failure (the request may already have been
-received). GETs remain freely parallelizable, cacheable, dedupable and retryable. The compiler knows the
-difference between a safe read and a side effect.
+received). GETs remain freely parallelizable, cacheable, dedupable and retryable.
+
+The one escape hatch is **`idempotent(key: <expr>)`**: it is a proof that repeating the write is safe, so
+the runtime re-enables retry for that fetch (`retry_safe = GET/HEAD || idempotent`) and sends an
+`Idempotency-Key` header built from the key. The compiler thus knows the difference between a safe read, an
+unsafe write, and a *provably retry-safe* write.
 
 ---
 
@@ -205,6 +244,10 @@ These keep the implementation honest and focused on the language ideas:
   large environment would want a cheaper scope representation.
 - **Expression-position `match` is synchronous.** A `match` used as a value (`let x = match …`) cannot do
   fetches in its arms; lift it to a statement. Statement-level `match` is fully async.
+- **Loop fusion handles the simple shape only.** A per-element GET fuses when its last path segment is the
+  loop element and its prefix is loop-invariant; a per-element *prefix*, or a key that flows through a
+  loop-local, is detected (warned) but not rewritten. `for` loops are effect-only: no accumulator, no
+  `break`/`continue`.
 - **The runtime is a scheduling tree-walker, not a bytecode VM/JIT.** The optimizer's data-dependency
   DAG is the real artefact; a bytecode backend and adaptive JIT are future work, not claimed here.
 ```

@@ -125,6 +125,33 @@ main:
 The pipeline itself is rich, too: `filter` · `map`/`pluck` · `sort` · `limit`/`take` · `skip` ·
 `reverse` · `unique` · `flatten` · `count` · `sum`.
 
+### 4½ · Request fusion / batching — vectorization for the wire 🧬
+
+If an endpoint declares a `batch:` rule, the optimizer goes further than dedup: it collapses
+several GETs that differ **only in the last path segment** into a *single* batched call, then
+**scatters** the array result back to each binding by a join key. N round-trips become one.
+
+```hale
+endpoint GH { base: "..."  batch: param("ids") key(.id) }
+
+fetch GH /users/1 -> a   //   the optimizer fuses these three
+fetch GH /users/2 -> b   //   into ONE  GET /users?ids=1,2,3
+fetch GH /users/3 -> c   //   and scatters the array back by .id
+```
+
+```text
+$ hale explain examples/batch.hale
+  wave 1:
+    • fetch GH /users?ids=… [batched ×3] -> __batch_0
+  wave 2:
+    • scatter __batch_0.id (from batch) -> a
+    • scatter __batch_0.id (from batch) -> b
+    • scatter __batch_0.id (from batch) -> c
+```
+
+The request-cost analysis then reports `≤ 1 request` instead of 3 — the network is hit once.
+No client library does this automatically; it's loop fusion, for HTTP.
+
 ---
 
 ### 5 · It serves, too — `consume ↔ serve`
@@ -156,53 +183,125 @@ an endpoint at compile time — hale reads it off the optimized IR.
 ### 7 · A compile-time SLA — `budget(...)` 🚀
 
 Because the cost is known statically, you can **assert** it. Annotate a flow or route with a
-`budget` and the compiler refuses to build if any path can exceed it:
+`budget` — over requests, fan-out, critical-path hops, **or wall-clock `p99`** — and the
+compiler refuses to build if any path can exceed it:
 
 ```hale
-flow Overview(id: String) -> Customer budget(requests: 3, parallel: 2, hops: 2) {
+endpoint Billing { base: "..."  latency: 120ms }     // declared per-hop latency
+
+flow Overview(id: String) -> Customer budget(requests: 3, parallel: 2, hops: 2, p99: 400ms) {
   fetch Billing /customers/{id} -> customer: Customer
   fetch Billing /customers/{customer.id}/invoices      | count() -> invoices
   fetch Billing /customers/{customer.id}/subscriptions | count() -> subs
-  log "{customer.email}: {invoices} invoices, {subs} subscriptions"
   return customer
 }
 ```
 
 ```text
-$ hale check examples/sla.hale     # add one more fetch, or tighten the budget…
-error: flow `Overview` has a critical path of 3 sequential hops, over its budget of 2
-  --> examples/sla.hale:26:39
-   = help: remove a data dependency so more calls run in one wave, or raise `budget(hops: M)`
-   = note: static request-cost analysis: sequential round-trips dominate latency
+$ hale explain examples/sla.hale
+flow Overview(id):  [≤ 3 requests, up to 2 in parallel, 2 hops deep, ~240ms critical path]
+                    (budget: requests ≤ 3, parallel ≤ 2, hops ≤ 2, p99 ≤ 400ms)
+  effects: reads {Billing}
 ```
 
-A performance budget that **lives in the type system** and is enforced by the compiler, not a
-dashboard you check after the incident. No client library can do this — they don't know your
-call graph at compile time. hale does.
+`p99` is summed over the critical path from each endpoint's declared `latency:`; promise a
+latency you can't prove (an undeclared hop) and the compiler says so. A performance budget that
+**lives in the type system**, not a dashboard you read after the incident. `hale explain` also
+prints a proved **effect signature** (`reads {Billing}` / `reads+writes {…}`) — capability
+information for every flow.
 
-### 8 · It won't leak your secrets — `Secret` 🔒
+### 7½ · N+1 query detection — the #1 client perf bug, caught at compile time 🪤
 
-Mark a field `Secret` and the compiler **tracks it through the program**. A secret may flow
-*into* a request (that's its job), but if it ever reaches a `log` or an outgoing HTTP response,
-the program does not compile:
+Fetch a list, then loop and fetch one thing per element — the **N+1 query**. hale finds it with
+a real **data-flow analysis**: it tracks which values came from the network (the *1*) and which
+derive from a `for` element (the *N*), threading that provenance through `let`s, `match` arms,
+and nested loops.
 
 ```hale
-type Customer { id: Integer  email: Email  card: Secret }
+fetch GH /users -> users: User[]
+for u in users {
+  fetch GH /users/{u.id}/repos -> repos   // ← one request per user
+  log "{u.login}: {repos.length}"
+}
 ```
 
 ```text
-$ hale check leak.hale
-error: secret value `card` must not appear in a log statement
-  --> leak.hale:5:19
-   |
- 5 |   log "card is {customer.card}"
-   |                         ^^^^
-   = note: secret-leak analysis: values typed `Secret` are tracked into every sink
+$ hale check examples/nplus1.hale
+warning: N+1 query: `GH /users/{u.id}/repos` runs once per element of `users`
+   = note: the classic 1+N: the collection was itself fetched, then one request fires per element
+$ hale explain examples/nplus1.hale
+flow Dashboard():  [unbounded requests — a fetch runs once per `for` element (N+1); …]
 ```
 
-It even catches the indirect case — returning a *whole record* that merely contains a `Secret`
-field from a `server` route is rejected too. Compile-time PII/secret-leak prevention, from a
-language that understands where your data flows.
+It sees through an indirection (`let id = u.id; fetch …/{id}`), reports **nested loops** as
+`Nˆ2`, and separately flags a **loop-invariant** read ("hoist it out"). Two tiers: the lint is a
+*warning* (an N+1 over a tiny list may be fine), but a per-element fetch makes the [cost](#6--it-tells-you-the-request-cost--before-you-ship)
+**unbounded**, so any `budget(...)` on that flow becomes a hard **compile error** — you can't
+promise a bound a loop can blow.
+
+And when the endpoint supports it, the compiler doesn't just complain — it **fixes it**. See §7¾.
+
+### 7¾ · …and then it fixes it — automatic loop fusion 🔧
+
+If the per-element endpoint declares a `batch:` rule, the optimizer **rewrites the loop**: it
+hoists the fetch out, gathers every key into one batched call, and replaces the in-loop fetch
+with a pure *scatter*. `1 + N` round-trips become `1 + 1` — loop-invariant code motion + batching,
+for the network.
+
+```hale
+endpoint GH { base: "..."  batch: param("ids") key(.id) }
+fetch GH /users -> users: User[]
+for u in users {
+  fetch GH /users/{u.id} -> detail   // ← auto-fused, not warned: the compiler hoists it
+  log "{detail.login}"
+}
+```
+
+```text
+$ hale explain examples/loop_fusion.hale
+flow Logins():  [≤ 2 requests, up to 1 in parallel, 2 hops deep]   ← was unbounded (N+1)
+  wave 1:  • fetch GH /users -> users
+  wave 2:  • fetch GH /users?ids=… [batched ×N, fused from loop] -> __loopbatch_0
+  wave 3:  • for u in … (per-element loop)
+             wave 1:  • scatter __loopbatch_0.id (from batch) -> detail
+```
+
+A runtime test confirms the loop's three per-element GETs hit the network **once**. (Multi-level
+fusion of nested loops follows the same mechanism, per innermost level.)
+
+### 8 · Information-flow control — data governance in the compiler 🔒
+
+Label a field `PII` or `Secret` and the compiler **tracks it through the program** along a
+lattice `Public < PII < Secret`. Each endpoint has a `clearance:` (the most sensitive data it
+may receive); a `log` or HTTP response is cleared only for `Public`. Data may never flow to a
+sink below its label:
+
+```hale
+type Customer { id: Integer  email: PII  card: Secret }
+endpoint Analytics { base: "..."  clearance: Public }   // refuses PII/Secret
+```
+
+```text
+$ hale check governance.hale
+error: `PII`-labelled value `email` must not flow to the request to `Analytics` (cleared for `Public`)
+   = note: information-flow control: a value's label may not exceed the sink's clearance
+```
+
+A secret may still flow *into* an endpoint that needs it (undeclared clearance = top), and the
+check is transitive — returning a whole record that merely *contains* a `Secret`/`PII` field is
+rejected too. This is GDPR / data-residency / secret-leak prevention enforced **at compile
+time** — the same `secret_field_of` taint machine, now a real Denning information-flow lattice.
+
+### 9 · The compiler knows which writes are safe to retry — `idempotent` ♻️
+
+A mutation is never silently re-sent. But mark it `idempotent(key: …)` and hale *proves* the
+write is safe to repeat — re-enabling retry for it and attaching an `Idempotency-Key` header
+(the Stripe model). No library can say *"this `POST` is retry-safe and that one isn't."* hale
+can, because it's in the type.
+
+```hale
+fetch POST Billing /charges idempotent(key: order.id) body { ... } -> r
+```
 
 ---
 
@@ -217,13 +316,16 @@ every codebase. They should be **properties the compiler checks and the optimize
 | Independent calls run in parallel **automatically** | ✗ (manual `gather`) | ✗ (manual `Promise.all`) | ✗ | **✓** |
 | **Won't compile** if you ignore a possible error | ✗ | ✗ | ✗ | **✓** |
 | Identical requests **deduplicated**; unused ones **dropped** | ✗ | ✗ | ✗ | **✓** |
+| Near-identical GETs **fused into one batched call** automatically | ✗ | ✗ | ✗ | **✓** |
 | Retry / backoff / timeout / cache as **declarative config** | manual | manual | annotations | **✓** |
 | In-language **mocks** + tests (offline, deterministic) | separate libs | separate libs | partial | **✓** |
 | **Record/replay** for deterministic offline runs | ✗ | ✗ | ✗ | **✓** |
 | **Contract** validation of responses at runtime | ✗ | ✗ | ✗ | **✓** |
 | Schema **inference** + **JSON Schema** export | ✗ | ✗ | ✗ | **✓** |
-| **Request/latency budget** enforced *at compile time* | ✗ | ✗ | ✗ | **✓** |
-| **Secret-leak prevention** (a `Secret` can't reach a log/response) | ✗ | ✗ | ✗ | **✓** |
+| **Request / latency (`p99`) budget** enforced *at compile time* | ✗ | ✗ | ✗ | **✓** |
+| **N+1 detection + automatic loop fusion** — a per-element fetch is flagged *and* batched | ✗ | ✗ | ✗ | **✓** |
+| **Information-flow control**: PII/Secret can't reach a lower-clearance sink | ✗ | ✗ | ✗ | **✓** |
+| **Retry-safety in the type**: proves which writes are `idempotent` | ✗ | ✗ | ✗ | **✓** |
 | One toolchain: type-check, `fmt`, LSP, explain-plan | n/a | n/a | n/a | **✓** |
 
 Same task — fetch a user, fan out to two more calls, handle a 404 — in Python vs hale:
@@ -268,14 +370,17 @@ hollow stubs.
 
 | Built and tested ✅ | Designed, not implemented ⏳ |
 |---|---|
-| Lexer, parser, AST, `rustc`-style diagnostics (carets + "did you mean") | Java (JNI) bindings |
-| Type system + checker: exhaustive `Result` handling, field typing, resolution | IntelliJ plugin (the VS Code extension is built) |
-| IR + optimizer: **dead-request elimination**, **parallel inference**, **request deduplication** | WASM / native (LLVM) codegen, adaptive JIT |
-| **Static request-cost analysis** (max requests, parallelism & critical-path hops) | Distributed cluster mode, haleHub registry |
-| **Compile-time SLA**: `budget(requests/parallel/hops)` enforced against the cost analysis | Redis-backed distributed cache |
-| **Secret-leak (taint) analysis**: a `Secret` value can never reach a log or response | OpenAPI / GraphQL schema *import* |
+| Lexer, parser, AST, `rustc`-style diagnostics (carets + "did you mean") | OpenAPI / GraphQL *import* → endpoints+types; OpenAPI/SDK *export* |
+| Type system + checker: exhaustive `Result` handling, field typing, resolution | Profile-guided (record/replay) adaptive scheduling; pagination primitive |
+| IR + optimizer: **dead-request elimination**, **parallel inference**, **request deduplication** | Distributed wave execution; haleHub registry; Redis cache |
+| **Auto request fusion / batching** (`/u/1`,`/u/2`→`/u?ids=1,2`, scatter by key) | Property-based fuzzing from contracts; freshness types |
+| **N+1 query detection** (data-flow) **+ automatic loop fusion** (`for` fetch → 1 batched call) | Java (JNI) bindings; IntelliJ plugin; WASM/LLVM codegen, JIT |
+| **Static cost analysis** (max requests, parallelism, critical-path hops & `p99` latency) | |
+| **Compile-time SLA**: `budget(requests/parallel/hops/p99)` enforced against the analysis | |
+| **Information-flow control**: PII/Secret label lattice + per-endpoint `clearance` | |
+| **Idempotency / retry-safety in the type** (`idempotent(key:)`); **effect signatures** | |
 | Concurrent runtime: wave scheduler, HTTP/2, retry/backoff, timeout, bearer auth, TTL cache, metrics | |
-| **Full HTTP verbs** (GET/POST/PUT/PATCH/DELETE) + JSON bodies; mutations never reordered/deduped/auto-retried | |
+| **Full HTTP verbs** (GET/POST/PUT/PATCH/DELETE) + JSON bodies; mutation safety | |
 | **`server` mode** — serve HTTP routes whose handlers consume APIs (auto-parallelized) | |
 | In-language **mock engine** + `test` blocks; runtime **contract** verification | |
 | **Language server** (`hale lsp`) + **VS Code extension**; **Python bindings** (PyO3, pip) | |
@@ -286,13 +391,19 @@ hollow stubs.
 
 ## Measured here
 
-`cargo test --workspace` → **59 tests + 1 doc-test, 0 failures** across six crates: lexer/parser,
-type-checker (every flagship rule — including **budget enforcement** and **secret-leak** — has both an
-accept and a reject test), optimizer (parallelism, dead-request elimination, deduplication, request-cost
-& critical-path hops), end-to-end runtime tests against an in-process HTTP server — including an
-**end-to-end `server`-mode test** that starts a hale gateway and asserts it aggregates two upstreams in
-parallel — schema inference + JSON Schema export, record/replay round-trips, and the language server. The
-Python bindings (PyO3) build into an `abi3` module and are exercised from Python.
+`cargo test --workspace` → **87 tests + 1 doc-test, 0 failures** across six crates: lexer/parser,
+type-checker (every flagship rule — exhaustive `Result`, **information-flow control**, **budget / `p99`
+enforcement**, **idempotency** — has both an accept and a reject test), optimizer (parallelism,
+dead-request elimination, deduplication, **request fusion**, **automatic loop fusion**, request-cost,
+critical-path hops & latency), **N+1 detection** (1+N over a fetched list, detection through an
+intermediate `let`, nested-loop `Nˆ2`, loop-invariant reads, the budget→unbounded rejection, and
+suppression once a loop is auto-fused), end-to-end runtime tests against an in-process HTTP server —
+including a **request-fusion test** that asserts 3 GETs hit the network **once**, a **loop-fusion test**
+that asserts a per-element `for` loop collapses to a single batched call, a **`for`-loop test** that
+asserts the body fans out to one request per element, and an **end-to-end `server`-mode test** that starts
+a hale gateway and asserts it aggregates two upstreams in parallel — schema inference + JSON Schema export,
+record/replay round-trips, and the language server. The Python bindings (PyO3) build into an `abi3` module
+and are exercised from Python.
 
 ### Parallel-inference benchmark
 
@@ -390,9 +501,9 @@ hale replay session.json examples/parallel.hale
 hale explain examples/gateway.hale     # plan + request cost, no network
 hale serve   examples/gateway.hale     # serve it on http://127.0.0.1:8088/api/...
 
-# Compile-time SLA + secret-leak prevention:
-hale explain examples/sla.hale         # cost incl. critical-path hops + declared budget
-hale check   examples/sla.hale         # budget met, no secret leaks → type-checks
+# Compile-time SLA (requests/hops/p99) + information-flow control + idempotency:
+hale explain examples/sla.hale         # cost incl. critical-path hops + latency + budget
+hale check   examples/governance.hale  # PII/Secret clearance + idempotent writes
 
 # Language server (point your editor's LSP client at this):
 hale lsp

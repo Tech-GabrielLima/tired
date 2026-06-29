@@ -1,0 +1,29 @@
+// Automatic request fusion / batching — vectorization for the wire.
+// Independent GETs that differ only in the last path segment are collapsed into ONE
+// batched call, and the array response is scattered back to each binding by the join key.
+//
+//   hale explain examples/batch.hale   # 3 fetches → 1 `[batched ×3]` + 3 scatters
+//   hale test    examples/batch.hale   # offline via the mock; a single upstream call
+
+endpoint GH {
+  base:  "https://api.github.com"
+  batch: param("ids") key(.id)     // /users/{id} groups fuse into /users?ids=<list>, joined by .id
+}
+
+mock GH {
+  GET /users -> [
+    { id: 1, login: "torvalds" },
+    { id: 2, login: "octocat" },
+    { id: 3, login: "gvanrossum" }
+  ]
+}
+
+test "three user lookups collapse into one batched request" {
+  using mock GH
+  fetch GH /users/1 -> a
+  fetch GH /users/2 -> b
+  fetch GH /users/3 -> c
+  assert a.login == "torvalds"
+  assert b.login == "octocat"
+  assert c.login == "gvanrossum"
+}

@@ -9,7 +9,9 @@ item           = endpoint | type_decl | flow | mock | test | server | statement 
 (* ---- declarations ---- *)
 
 endpoint       = "endpoint" ident "{" { setting } "}" ;
-setting        = name ":" value { value } ;          (* e.g.  retry: 3 backoff(exponential) *)
+setting        = name ":" value { value } ;          (* base/auth/timeout/retry/cache/
+                                                        clearance: <Label> / latency: <duration> /
+                                                        batch: param("ids") key(.field) *)
 
 type_decl      = ("type" | "contract") ident [ "." ident ] "{" { field } "}" ;
 field          = name ":" type [ "where" "(" constraint ")" ] [ "," ] ;
@@ -21,7 +23,8 @@ param          = name ":" type ;
 (* A compile-time SLA: the static cost analysis must satisfy every declared bound, or the
    program is rejected. *)
 budget         = "budget" "(" budget_field { "," budget_field } ")" ;
-budget_field   = ( "requests" | "parallel" | "hops" ) ":" int ;
+budget_field   = ( "requests" | "parallel" | "hops" ) ":" int
+               | "p99" ":" duration ;                 (* wall-clock latency budget *)
 
 mock           = "mock" ident "{" { mock_route } "}" ;
 mock_route     = ident path "->" expr ;              (* ident = HTTP method: GET, POST, ... *)
@@ -46,12 +49,14 @@ statement      = fetch
                | "let" ident "=" expr
                | "log" expr
                | "parallel" block
+               | "for" ident "in" expr block       (* run the body per element; effect-only *)
                | "return" [ expr ]
                | "assert" expr
                | "using" "mock" ident
                | expr [ "->" binding ] ;
 
 fetch          = "fetch" [ method ] ident path
+                 [ "idempotent" "(" name ":" expr ")" ]   (* mark a mutation retry-safe *)
                  [ "body" expr ]
                  [ "params" "{" { name ":" expr [ "," ] } "}" ]
                  { "|" pipeline_op }

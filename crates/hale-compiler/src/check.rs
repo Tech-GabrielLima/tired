@@ -14,7 +14,7 @@ use hale_syntax::ast::*;
 use hale_syntax::diag::{did_you_mean, Diagnostic, Diagnostics};
 use hale_syntax::span::Span;
 
-use crate::types::{ErrDomain, RecordField, Type, TypeTable};
+use crate::types::{ErrDomain, Label, RecordField, Type, TypeTable};
 
 pub struct Analysis {
     pub table: TypeTable,
@@ -41,12 +41,16 @@ struct Checker {
     results: Vec<(String, Type, Span)>,
     /// Names ever used as a `match` scrutinee, or returned directly (= propagated).
     handled: HashSet<String>,
-    /// When `Some(sink)`, we are type-checking an expression that flows to an observable
-    /// sink (a `log`, or an HTTP response in a `server` route). A `Secret`-typed value
-    /// reaching here is a leak. Drives the secret-leak (taint) analysis.
-    leak_sink: Option<&'static str>,
+    /// When `Some((clearance, sink))`, we are type-checking an expression that flows to a
+    /// sink with the given clearance — a `log`/HTTP response (clearance `Public`), or a
+    /// `fetch` request (the endpoint's clearance). A value whose label exceeds the clearance
+    /// is an illegal information flow. Drives the information-flow (taint) analysis.
+    leak_floor: Option<(Label, String)>,
     /// `true` while checking a `server` route handler (so `return` is a response sink).
     in_route: bool,
+    /// Per-endpoint information-flow clearance (from `clearance: <Label>`). Absent ⇒ the
+    /// top label `Secret` (an undeclared endpoint accepts anything, e.g. its bearer token).
+    endpoint_clearance: HashMap<String, Label>,
 }
 
 /// Bare identifiers that are language constants / config enums rather than variables.
@@ -92,11 +96,15 @@ impl Checker {
         let mut flows = HashSet::new();
         let mut type_names = HashSet::new();
 
+        let mut endpoint_clearance: HashMap<String, Label> = HashMap::new();
         // First pass: collect declarations so forward references resolve.
         for item in &program.items {
             match item {
                 Item::Endpoint(e) => {
                     endpoints.insert(e.name.node.clone());
+                    if let Some(label) = endpoint_clearance_setting(e) {
+                        endpoint_clearance.insert(e.name.node.clone(), label);
+                    }
                 }
                 Item::Flow(f) => {
                     flows.insert(f.name.node.clone());
@@ -131,8 +139,9 @@ impl Checker {
             diags: Diagnostics::new(),
             results: Vec::new(),
             handled: HashSet::new(),
-            leak_sink: None,
+            leak_floor: None,
             in_route: false,
+            endpoint_clearance,
         }
     }
 
@@ -243,11 +252,11 @@ impl Checker {
                 self.bind(scope, &name.node, ty);
             }
             Stmt::Log { value, .. } => {
-                let prev = self.leak_sink;
-                self.leak_sink = Some("a log statement");
+                let prev = self.leak_floor.take();
+                self.leak_floor = Some((Label::Public, "a log statement".into()));
                 let ty = self.infer(value, scope, None);
-                self.flag_secret_record(&ty, value);
-                self.leak_sink = prev;
+                self.flag_label_record(&ty, value);
+                self.leak_floor = prev;
             }
             Stmt::Parallel { block, .. } => {
                 // A parallel block shares the enclosing scope; bindings flow outward.
@@ -255,20 +264,34 @@ impl Checker {
                     self.check_stmt(s, scope);
                 }
             }
+            Stmt::ForEach {
+                var, iter, body, ..
+            } => {
+                // The loop variable takes the iterable's element type, so `.field` access on
+                // it inside the body is checked against the element record.
+                let iter_ty = self.infer(iter, scope, None);
+                let elem = iter_ty.element().unwrap_or(Type::Unknown);
+                scope.push(HashMap::new());
+                self.bind(scope, &var.node, elem);
+                for s in &body.stmts {
+                    self.check_stmt(s, scope);
+                }
+                scope.pop();
+            }
             Stmt::Return { value, .. } => {
                 if let Some(v) = value {
                     if let Expr::Ident(n) = v {
                         self.handled.insert(n.node.clone());
                     }
-                    let prev = self.leak_sink;
+                    let prev = self.leak_floor.take();
                     if self.in_route {
-                        self.leak_sink = Some("an HTTP response");
+                        self.leak_floor = Some((Label::Public, "an HTTP response".into()));
                     }
                     let ty = self.infer(v, scope, None);
                     if self.in_route {
-                        self.flag_secret_record(&ty, v);
+                        self.flag_label_record(&ty, v);
                     }
-                    self.leak_sink = prev;
+                    self.leak_floor = prev;
                 }
             }
             Stmt::Assert { value, .. } => {
@@ -301,18 +324,47 @@ impl Checker {
             self.diags.push(d);
         }
 
-        // Path parameters and query params reference values in scope.
+        // `idempotent(...)` on a read is redundant — GET/HEAD are already retry-safe.
+        if f.idempotency_key.is_some() && matches!(f.method.as_str(), "GET" | "HEAD") {
+            self.diags.push(
+                Diagnostic::warning(
+                    f.endpoint.span,
+                    format!("`idempotent(...)` is redundant on a {} request", f.method),
+                )
+                .with_note("reads are already retry-safe; the marker only matters for mutations"),
+            );
+        }
+
+        // Path/query params and the body all flow OUT to the endpoint — a sink with the
+        // endpoint's clearance. Set the information-flow floor while we infer them, so a
+        // value (or a record field) whose label exceeds the clearance is rejected.
+        let clearance = self.clearance_of(&f.endpoint.node);
+        let prev_floor = self.leak_floor.take();
+        if clearance < Label::Secret {
+            self.leak_floor = Some((
+                clearance,
+                format!(
+                    "the request to `{}` (cleared for `{}`)",
+                    f.endpoint.node,
+                    clearance.name()
+                ),
+            ));
+        }
         for seg in &f.path.segments {
             if let PathSeg::Param(e) = seg {
-                self.infer(e, scope, None);
+                let t = self.infer(e, scope, None);
+                self.flag_label_record(&t, e);
             }
         }
         for (_, v) in &f.params {
-            self.infer(v, scope, None);
+            let t = self.infer(v, scope, None);
+            self.flag_label_record(&t, v);
         }
         if let Some(b) = &f.body {
-            self.infer(b, scope, None);
+            let t = self.infer(b, scope, None);
+            self.flag_label_record(&t, b);
         }
+        self.leak_floor = prev_floor;
 
         // Determine the binding type and the pipeline element type.
         let binding_ty = f
@@ -392,13 +444,13 @@ impl Checker {
             Expr::EnvVar(_) => Type::String,
             Expr::Ident(n) => {
                 let ty = self.lookup(scope, &n.node).unwrap_or(Type::Unknown);
-                self.flag_secret_value(&ty, &n.node, n.span);
+                self.flag_label_value(&ty, &n.node, n.span);
                 ty
             }
             Expr::ImplicitField(field) => {
                 let base = elem.cloned().unwrap_or(Type::Unknown);
                 let ty = self.field_type(&base, field, None);
-                self.flag_secret_value(&ty, &field.node, field.span);
+                self.flag_label_value(&ty, &field.node, field.span);
                 ty
             }
             Expr::Field { base, field, .. } => {
@@ -414,7 +466,7 @@ impl Checker {
                     _ => None,
                 };
                 let ty = self.field_type(&bt, field, base_name);
-                self.flag_secret_value(&ty, &field.node, field.span);
+                self.flag_label_value(&ty, &field.node, field.span);
                 ty
             }
             Expr::Call { callee, args, .. } => {
@@ -525,68 +577,105 @@ impl Checker {
         }
     }
 
-    // ---------- secret-leak (taint) analysis ----------
+    // ---------- information-flow control (taint lattice) ----------
 
-    /// Flag a direct reference to a `Secret`-typed value (an identifier or field access)
-    /// when it appears inside a sink (a `log` or an HTTP response).
-    fn flag_secret_value(&mut self, ty: &Type, label: &str, span: Span) {
-        let Some(sink) = self.leak_sink else { return };
-        if ty.is_secret() {
+    /// The clearance of an endpoint: how sensitive a value may be and still be sent to it.
+    /// Undeclared ⇒ `Secret` (top): the endpoint accepts anything (e.g. its bearer token).
+    fn clearance_of(&self, endpoint: &str) -> Label {
+        self.endpoint_clearance
+            .get(endpoint)
+            .copied()
+            .unwrap_or(Label::Secret)
+    }
+
+    /// The worst (highest) information-flow label reachable through a type, plus the dotted
+    /// field path that carries it (`None` if the value itself is the labelled scalar).
+    /// Records/arrays/optionals take the max over what they carry; cycles are broken.
+    fn worst_label(&self, ty: &Type, visited: &mut HashSet<String>) -> (Label, Option<String>) {
+        match ty {
+            Type::Record(name) => {
+                if !visited.insert(name.clone()) {
+                    return (Label::Public, None);
+                }
+                let mut worst = (Label::Public, None);
+                if let Some(fields) = self.table.fields(name) {
+                    for f in fields {
+                        let direct = f.ty.intrinsic_label();
+                        let (nested, npath) = self.worst_label(&f.ty, visited);
+                        let (cand_label, cand_path) = if direct >= nested {
+                            (direct, Some(f.name.clone()))
+                        } else {
+                            (
+                                nested,
+                                Some(match npath {
+                                    Some(p) => format!("{}.{p}", f.name),
+                                    None => f.name.clone(),
+                                }),
+                            )
+                        };
+                        if cand_label > worst.0 {
+                            worst = (cand_label, cand_path);
+                        }
+                    }
+                }
+                visited.remove(name); // pop the DFS path so sibling fields can re-enter
+                worst
+            }
+            Type::Array(t) | Type::Optional(t) => self.worst_label(t, visited),
+            other => (other.intrinsic_label(), None),
+        }
+    }
+
+    /// Flag a direct reference to a labelled scalar (an identifier/field) flowing to the
+    /// current sink when its label exceeds the sink's clearance.
+    fn flag_label_value(&mut self, ty: &Type, name: &str, span: Span) {
+        let Some((clearance, sink)) = self.leak_floor.clone() else {
+            return;
+        };
+        let l = ty.intrinsic_label();
+        if l > clearance {
             self.diags.push(
                 Diagnostic::error(
                     span,
-                    format!("secret value `{label}` must not appear in {sink}"),
+                    format!(
+                        "`{}`-labelled value `{name}` must not flow to {sink}",
+                        l.name()
+                    ),
                 )
-                .with_help("redact it (don't log it / don't put it in the response)")
+                .with_help("redact or declassify it, or raise the sink's clearance")
                 .with_note(
-                    "secret-leak analysis: values typed `Secret` are tracked into every sink",
+                    "information-flow control: a value's label may not exceed the sink's clearance",
                 ),
             );
         }
     }
 
-    /// Flag a composite value (a record, or array/optional of records) that *carries* a
-    /// `Secret` field reaching a sink — e.g. `return account` when `account.token: Secret`.
-    fn flag_secret_record(&mut self, ty: &Type, e: &Expr) {
-        let Some(sink) = self.leak_sink else { return };
-        if ty.is_secret() {
-            return; // a direct secret is already reported by `flag_secret_value`
+    /// Flag a composite value (record/array) that *carries* a labelled field exceeding the
+    /// current sink's clearance — e.g. `return account` when `account.token: Secret`, or
+    /// `fetch Analytics body account` when `account.email: PII` and Analytics is `Public`.
+    fn flag_label_record(&mut self, ty: &Type, e: &Expr) {
+        let Some((clearance, sink)) = self.leak_floor.clone() else {
+            return;
+        };
+        if ty.intrinsic_label() > clearance {
+            return; // a direct labelled scalar is already reported by `flag_label_value`
         }
         let mut visited = HashSet::new();
-        if let Some(path) = self.secret_field_of(ty, &mut visited) {
+        let (label, path) = self.worst_label(ty, &mut visited);
+        if label > clearance {
+            let path = path.unwrap_or_else(|| "a field".into());
             self.diags.push(
                 Diagnostic::error(
                     e.span(),
                     format!(
-                        "value `{}` carries the secret field `{path}` and must not appear in {sink}",
-                        expr_label(e)
+                        "value `{}` carries the `{}`-labelled field `{path}`, which must not flow to {sink}",
+                        expr_label(e),
+                        label.name()
                     ),
                 )
-                .with_help("return a projection without the secret field (e.g. `map`/a record literal)")
-                .with_note("secret-leak analysis: a `Secret` field must never reach a log or a response"),
+                .with_help("send/return a projection without the sensitive field, or raise the sink's clearance")
+                .with_note("information-flow control: data residency / sensitivity enforced at compile time"),
             );
-        }
-    }
-
-    /// The dotted path to the first `Secret` field reachable inside a record type, if any.
-    fn secret_field_of(&self, ty: &Type, visited: &mut HashSet<String>) -> Option<String> {
-        match ty {
-            Type::Record(name) => {
-                if !visited.insert(name.clone()) {
-                    return None; // break cyclic record references
-                }
-                for f in self.table.fields(name)? {
-                    if f.ty.is_secret() {
-                        return Some(f.name.clone());
-                    }
-                    if let Some(inner) = self.secret_field_of(&f.ty, visited) {
-                        return Some(format!("{}.{inner}", f.name));
-                    }
-                }
-                None
-            }
-            Type::Array(t) | Type::Optional(t) => self.secret_field_of(t, visited),
-            _ => None,
         }
     }
 
@@ -800,6 +889,15 @@ fn expr_label(e: &Expr) -> String {
     }
 }
 
+/// Read an endpoint's information-flow clearance from a `clearance: <Label>` setting.
+fn endpoint_clearance_setting(e: &EndpointDecl) -> Option<Label> {
+    let setting = e.settings.iter().find(|s| s.key.node == "clearance")?;
+    match setting.values.first()? {
+        Expr::Ident(n) => Label::parse(&n.node),
+        _ => None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -921,7 +1019,8 @@ mod tests {
         "#;
         let e = errs(src);
         assert!(
-            e.iter().any(|m| m.contains("secret value `token`")),
+            e.iter()
+                .any(|m| m.contains("`Secret`-labelled value `token`") && m.contains("log")),
             "{e:?}"
         );
     }
@@ -941,7 +1040,88 @@ mod tests {
         let e = errs(src);
         assert!(
             e.iter()
-                .any(|m| m.contains("carries the secret field `token`")),
+                .any(|m| m.contains("carries the `Secret`-labelled field `token`")),
+            "{e:?}"
+        );
+    }
+
+    #[test]
+    fn pii_to_a_public_endpoint_is_rejected() {
+        // GDPR-style residency: PII may not flow to an endpoint cleared only for Public.
+        let src = r#"
+            type User { id: Integer  email: PII }
+            endpoint Store     { base: "x" }
+            endpoint Analytics { base: "y"  clearance: Public }
+            fetch Store /me -> u: User
+            fetch Analytics /track/{u.email} -> r
+        "#;
+        let e = errs(src);
+        assert!(
+            e.iter()
+                .any(|m| m.contains("`PII`-labelled value `email`") && m.contains("Analytics")),
+            "{e:?}"
+        );
+    }
+
+    #[test]
+    fn pii_to_a_pii_cleared_endpoint_is_ok() {
+        let src = r#"
+            type User { id: Integer  email: PII }
+            endpoint Store      { base: "x" }
+            endpoint EU_Billing { base: "y"  clearance: PII }
+            fetch Store /me -> u: User
+            fetch EU_Billing /charge/{u.email} -> r
+        "#;
+        assert!(!diags(src).has_errors(), "{:?}", errs(src));
+    }
+
+    #[test]
+    fn secret_to_a_pii_cleared_endpoint_is_rejected() {
+        // Secret outranks PII: a card number may not go to a merely-PII-cleared endpoint.
+        let src = r#"
+            type Account { id: Integer  card: Secret }
+            endpoint Store      { base: "x" }
+            endpoint EU_Billing { base: "y"  clearance: PII }
+            fetch Store /me -> a: Account
+            fetch EU_Billing /charge/{a.card} -> r
+        "#;
+        let e = errs(src);
+        assert!(
+            e.iter()
+                .any(|m| m.contains("`Secret`-labelled value `card`")),
+            "{e:?}"
+        );
+    }
+
+    #[test]
+    fn logging_pii_is_rejected() {
+        let src = r#"
+            type User { id: Integer  email: PII }
+            endpoint Store { base: "x" }
+            fetch Store /me -> u: User
+            log "user {u.email}"
+        "#;
+        let e = errs(src);
+        assert!(
+            e.iter().any(|m| m.contains("`PII`-labelled value `email`")),
+            "{e:?}"
+        );
+    }
+
+    #[test]
+    fn pii_in_a_request_body_to_public_endpoint_is_rejected() {
+        // The body is walked too: a PII field inside a record body is caught.
+        let src = r#"
+            type User { id: Integer  email: PII }
+            endpoint Store     { base: "x" }
+            endpoint Analytics { base: "y"  clearance: Public }
+            fetch Store /me -> u: User
+            fetch POST Analytics /events body { who: u.email } -> r
+        "#;
+        let e = errs(src);
+        assert!(
+            e.iter()
+                .any(|m| m.contains("`PII`-labelled value `email`") && m.contains("Analytics")),
             "{e:?}"
         );
     }
@@ -957,6 +1137,35 @@ mod tests {
             log "verified {ok.id}"
         "#;
         assert!(!diags(src).has_errors(), "{:?}", errs(src));
+    }
+
+    #[test]
+    fn idempotent_marker_parses_and_a_mutation_is_accepted() {
+        let src = r#"
+            endpoint Billing { base: "x" }
+            flow Pay(order: String) {
+              fetch POST Billing /charges idempotent(key: order) body { id: order } -> r
+            }
+        "#;
+        assert!(!diags(src).has_errors(), "{:?}", errs(src));
+    }
+
+    #[test]
+    fn idempotent_on_a_get_is_redundant_warning() {
+        let src = r#"
+            endpoint GH { base: "x" }
+            fetch GH /users/1 idempotent(key: "k") -> u
+            log "{u}"
+        "#;
+        let msgs: Vec<String> = diags(src)
+            .items()
+            .iter()
+            .map(|d| d.message.clone())
+            .collect();
+        assert!(
+            msgs.iter().any(|m| m.contains("redundant on a GET")),
+            "{msgs:?}"
+        );
     }
 
     #[test]

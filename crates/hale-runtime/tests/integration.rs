@@ -62,7 +62,13 @@ fn handle(mut stream: TcpStream, latency: Duration, count: Arc<AtomicUsize>) {
 }
 
 fn response_for(path: &str) -> (&'static str, String) {
-    if path.contains("/repos") {
+    if path.contains("ids=") {
+        // A batched request (`/users?ids=1,2,3`) returns the collection as an array.
+        (
+            "200 OK",
+            r#"[{"id":1,"login":"u1"},{"id":2,"login":"u2"},{"id":3,"login":"u3"}]"#.to_string(),
+        )
+    } else if path.contains("/repos") {
         // Note the negative star count — used by the contract test.
         (
             "200 OK",
@@ -142,6 +148,79 @@ fn parallel_inference_overlaps_independent_fetches() {
         "expected concurrent execution, took {elapsed:?}"
     );
     println!("3×200ms fetches finished in {elapsed:?} (serial lower bound: 600ms)");
+}
+
+#[test]
+fn request_fusion_collapses_n_gets_into_one_batched_call() {
+    let server = spawn_server(Duration::from_millis(5));
+    let src = format!(
+        r#"
+        endpoint S {{ base: "{}"  batch: param("ids") key(.id) }}
+        fetch S /users/1 -> a
+        fetch S /users/2 -> b
+        fetch S /users/3 -> c
+        log "{{a.login}} {{b.login}} {{c.login}}"
+        "#,
+        server.base
+    );
+    let runtime = build(&src);
+    rt().block_on(async { runtime.run().await }).expect("run");
+    // Three GETs were fused into a single `/users?ids=1,2,3` round-trip.
+    assert_eq!(
+        server.count.load(Ordering::SeqCst),
+        1,
+        "expected request fusion to hit the network once"
+    );
+}
+
+#[test]
+fn for_loop_issues_one_request_per_element() {
+    let server = spawn_server(Duration::from_millis(5));
+    // A per-element fetch — the N+1 shape. It is only a *warning* at compile time, so the
+    // program runs; here we prove it really fans out to one request per loop element.
+    let src = format!(
+        r#"
+        endpoint S {{ base: "{}" }}
+        let ids = [1, 2, 3, 4]
+        for id in ids {{
+            fetch S /users/{{id}} -> u
+            log "{{u.login}}"
+        }}
+        "#,
+        server.base
+    );
+    let runtime = build(&src);
+    rt().block_on(async { runtime.run().await }).expect("run");
+    assert_eq!(
+        server.count.load(Ordering::SeqCst),
+        4,
+        "the loop body should run once per element"
+    );
+}
+
+#[test]
+fn loop_fusion_collapses_a_per_element_loop_into_one_batched_request() {
+    let server = spawn_server(Duration::from_millis(5));
+    // Three per-element GETs inside a `for` loop, to a batch-enabled endpoint. The optimizer
+    // hoists them out into ONE `/users?ids=1,2,3` call and scatters the results back.
+    let src = format!(
+        r#"
+        endpoint S {{ base: "{}"  batch: param("ids") key(.id) }}
+        let ids = [1, 2, 3]
+        for id in ids {{
+            fetch S /users/{{id}} -> u
+            log "{{u.login}}"
+        }}
+        "#,
+        server.base
+    );
+    let runtime = build(&src);
+    rt().block_on(async { runtime.run().await }).expect("run");
+    assert_eq!(
+        server.count.load(Ordering::SeqCst),
+        1,
+        "loop fusion should collapse the per-element loop into a single network request"
+    );
 }
 
 #[test]

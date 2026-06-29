@@ -1,0 +1,32 @@
+// Auto loop fusion — the N+1 cure, applied by the compiler.
+// A per-element GET to a batch-enabled endpoint inside a `for` loop is HOISTED out of the
+// loop: all its keys are gathered into ONE batched call (`/users?ids=…`, the ids produced by
+// mapping the key over the collection), and the in-loop fetch becomes a pure scatter. 1+N → 1+1.
+//
+//   hale check   examples/loop_fusion.hale   # reports the fusion; no N+1 warning (it's fixed)
+//   hale explain examples/loop_fusion.hale   # BOUNDED cost: a list call + one `[batched …]` call
+//   hale test    examples/loop_fusion.hale   # offline via the mock; the loop hits the API once
+
+endpoint GH {
+  base:  "https://api.github.com"
+  batch: param("ids") key(.id)     // /users/{id} fuses into /users?ids=<list>, joined by .id
+}
+
+type User { id: Integer  login: String }
+
+mock GH {
+  GET /users -> [ { id: 1, login: "torvalds" }, { id: 2, login: "octocat" } ]
+}
+
+flow Logins() {
+  fetch GH /users -> users: User[]      // the list (the "1")
+  for u in users {
+    fetch GH /users/{u.id} -> detail: User   // ← per-element GET; auto-fused into /users?ids=…
+    log "login: {detail.login}"
+  }
+}
+
+test "the loop's per-user lookups fuse into one batched call" {
+  using mock GH
+  Logins()
+}

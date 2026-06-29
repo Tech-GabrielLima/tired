@@ -20,7 +20,7 @@ pub fn lower_program(program: &Program) -> (Body, Vec<Flow>, Vec<Test>, Vec<Serv
             _ => None,
         })
         .collect();
-    let main = lower_stmts(&main_stmts);
+    let mut main = lower_stmts(&main_stmts);
 
     let mut flows = Vec::new();
     let mut tests = Vec::new();
@@ -42,7 +42,137 @@ pub fn lower_program(program: &Program) -> (Body, Vec<Flow>, Vec<Test>, Vec<Serv
             _ => {}
         }
     }
+
+    // Copy each endpoint's declared `latency:` and `batch:` rule onto its fetch nodes, so the
+    // optimizer / cost analysis can use them without re-reading the AST.
+    let latency = endpoint_latencies(program);
+    let batch = endpoint_batch_rules(program);
+    if !latency.is_empty() || !batch.is_empty() {
+        let go = |b: &mut Body| {
+            annotate_latency(b, &latency);
+            annotate_batch(b, &batch);
+        };
+        go(&mut main);
+        for f in &mut flows {
+            go(&mut f.body);
+        }
+        for t in &mut tests {
+            go(&mut t.body);
+        }
+        for s in &mut servers {
+            for r in &mut s.routes {
+                go(&mut r.body);
+            }
+        }
+    }
     (main, flows, tests, servers)
+}
+
+/// Read each endpoint's `batch: param("ids") key(.id)` rule: (query param, key field).
+fn endpoint_batch_rules(program: &Program) -> std::collections::HashMap<String, (String, String)> {
+    let mut map = std::collections::HashMap::new();
+    for item in &program.items {
+        if let Item::Endpoint(e) = item {
+            if let Some(s) = e.settings.iter().find(|s| s.key.node == "batch") {
+                let mut param = None;
+                let mut key = None;
+                for v in &s.values {
+                    if let Expr::Call { callee, args, .. } = v {
+                        if let Expr::Ident(n) = callee.as_ref() {
+                            match (n.node.as_str(), args.first()) {
+                                ("param", Some(a)) => param = str_atom(a),
+                                ("key", Some(a)) => key = str_atom(a),
+                                _ => {}
+                            }
+                        }
+                    }
+                }
+                if let (Some(p), Some(k)) = (param, key) {
+                    map.insert(e.name.node.clone(), (p, k));
+                }
+            }
+        }
+    }
+    map
+}
+
+/// Extract a plain identifier-ish string from a setting atom: a string literal `"ids"`,
+/// or an implicit field `.id`.
+fn str_atom(e: &Expr) -> Option<String> {
+    match e {
+        Expr::ImplicitField(n) => Some(n.node.clone()),
+        Expr::Str { parts, .. } => {
+            let mut s = String::new();
+            for p in parts {
+                if let StrPart::Lit(t) = p {
+                    s.push_str(t);
+                }
+            }
+            Some(s)
+        }
+        _ => None,
+    }
+}
+
+/// Stamp each GET fetch to a batch-enabled endpoint with a candidate [`BatchSpec`]
+/// (empty ids); the optimizer fuses groups of candidates. Recurses into `match` arms.
+fn annotate_batch(body: &mut Body, batch: &std::collections::HashMap<String, (String, String)>) {
+    for node in &mut body.nodes {
+        match &mut node.kind {
+            NodeKind::Fetch(f) if f.method == "GET" => {
+                if let Some((param, key)) = batch.get(&f.endpoint) {
+                    f.batch = Some(BatchSpec {
+                        query_param: param.clone(),
+                        key_field: key.clone(),
+                        ids: Vec::new(),
+                        mapped: None,
+                    });
+                }
+            }
+            NodeKind::Match(m) => {
+                for arm in &mut m.arms {
+                    if let ArmBodyIr::Body(b) = &mut arm.body {
+                        annotate_batch(b, batch);
+                    }
+                }
+            }
+            NodeKind::ForEach(fe) => annotate_batch(&mut fe.body, batch),
+            _ => {}
+        }
+    }
+}
+
+/// Read each endpoint's declared `latency: <duration>` (ms) from the program.
+fn endpoint_latencies(program: &Program) -> std::collections::HashMap<String, u64> {
+    let mut map = std::collections::HashMap::new();
+    for item in &program.items {
+        if let Item::Endpoint(e) = item {
+            if let Some(s) = e.settings.iter().find(|s| s.key.node == "latency") {
+                if let Some(Expr::Duration(ms, _)) = s.values.first() {
+                    map.insert(e.name.node.clone(), *ms);
+                }
+            }
+        }
+    }
+    map
+}
+
+/// Stamp `FetchIr::latency_ms` from the endpoint map, recursing into `match`-arm bodies.
+fn annotate_latency(body: &mut Body, latency: &std::collections::HashMap<String, u64>) {
+    for node in &mut body.nodes {
+        match &mut node.kind {
+            NodeKind::Fetch(f) => f.latency_ms = latency.get(&f.endpoint).copied(),
+            NodeKind::Match(m) => {
+                for arm in &mut m.arms {
+                    if let ArmBodyIr::Body(b) = &mut arm.body {
+                        annotate_latency(b, latency);
+                    }
+                }
+            }
+            NodeKind::ForEach(fe) => annotate_latency(&mut fe.body, latency),
+            _ => {}
+        }
+    }
 }
 
 fn lower_server(decl: &ServerDecl) -> Server {
@@ -128,6 +258,35 @@ fn lower_stmt(s: &Stmt, nodes: &mut Vec<Node>) {
                 lower_stmt(inner, nodes);
             }
         }
+        Stmt::ForEach {
+            var,
+            iter,
+            body,
+            span,
+        } => {
+            let inner = lower_stmts(&body.stmts);
+            // The loop reads the iterable plus whatever its body refers to from the
+            // enclosing scope (so the loop depends on the node producing the collection).
+            let mut reads = vars(iter);
+            let mut external = body_external_reads(&inner);
+            external.remove(&var.node); // the loop variable is bound by the loop itself
+            reads.extend(external);
+            let returns = body_can_return(&inner);
+            push(
+                nodes,
+                NodeKind::ForEach(Box::new(ForEachIr {
+                    var: var.node.clone(),
+                    iter: iter.clone(),
+                    body: inner,
+                    returns,
+                    span: *span,
+                })),
+                None,
+                reads,
+                true, // a loop is an effect: ordered, always live (it does I/O)
+                *span,
+            );
+        }
         Stmt::Fetch(f) => {
             let mut reads = BTreeSet::new();
             for seg in &f.path.segments {
@@ -140,6 +299,9 @@ fn lower_stmt(s: &Stmt, nodes: &mut Vec<Node>) {
             }
             if let Some(b) = &f.body {
                 free_vars(b, &mut reads);
+            }
+            if let Some(k) = &f.idempotency_key {
+                free_vars(k, &mut reads);
             }
             for op in &f.pipeline {
                 pipeline_reads(op, &mut reads);
@@ -154,7 +316,7 @@ fn lower_stmt(s: &Stmt, nodes: &mut Vec<Node>) {
             let is_mutation = f.method != "GET";
             push(
                 nodes,
-                NodeKind::Fetch(FetchIr {
+                NodeKind::Fetch(Box::new(FetchIr {
                     method: f.method.clone(),
                     endpoint: f.endpoint.node.clone(),
                     endpoint_span: f.endpoint.span,
@@ -165,10 +327,13 @@ fn lower_stmt(s: &Stmt, nodes: &mut Vec<Node>) {
                         .map(|(k, v)| (k.node.clone(), v.clone()))
                         .collect(),
                     body: f.body.clone(),
+                    idempotency_key: f.idempotency_key.clone(),
+                    latency_ms: None, // filled in by `annotate_latency` once endpoints are known
+                    batch: None,      // filled in by `annotate_batch`
                     pipeline: f.pipeline.clone(),
                     as_result,
                     contract_ty: f.bind.as_ref().and_then(|b| b.ty.clone()),
-                }),
+                })),
                 f.bind.as_ref().map(|b| b.name.node.clone()),
                 reads,
                 is_mutation,
@@ -326,6 +491,11 @@ fn vars(e: &Expr) -> BTreeSet<String> {
     s
 }
 
+/// Free variables of an expression — used by the optimizer's fusion pass.
+pub(crate) fn free_vars_of(e: &Expr) -> BTreeSet<String> {
+    vars(e)
+}
+
 fn pipeline_reads(op: &PipelineOp, out: &mut BTreeSet<String>) {
     match op {
         PipelineOp::Filter { lambda, .. } | PipelineOp::Map { lambda, .. } => {
@@ -454,8 +624,52 @@ fn stmt_free_vars(s: &Stmt, out: &mut BTreeSet<String>) {
                 stmt_free_vars(s, out);
             }
         }
+        Stmt::ForEach {
+            var, iter, body, ..
+        } => {
+            free_vars(iter, out);
+            let mut inner = BTreeSet::new();
+            for s in &body.stmts {
+                stmt_free_vars(s, &mut inner);
+            }
+            inner.remove(&var.node);
+            out.extend(inner);
+        }
         Stmt::UsingMock { .. } => {}
     }
+}
+
+/// The variables a [`Body`] reads from its enclosing scope: every node's reads minus the
+/// variables that body binds itself. Used to wire a `for`/match node's dependency edges.
+fn body_external_reads(body: &Body) -> BTreeSet<String> {
+    let mut reads = BTreeSet::new();
+    let mut binds = BTreeSet::new();
+    for n in &body.nodes {
+        for r in &n.reads {
+            reads.insert(r.clone());
+        }
+        if let Some(b) = &n.binding {
+            binds.insert(b.clone());
+        }
+    }
+    for b in binds {
+        reads.remove(&b);
+    }
+    reads
+}
+
+/// Whether a body can hit a `return` — directly, or inside a nested `match` arm or `for`
+/// loop. Lets the executor distinguish an early return from a trailing body value.
+fn body_can_return(body: &Body) -> bool {
+    body.nodes.iter().any(|n| match &n.kind {
+        NodeKind::Return(_) => true,
+        NodeKind::ForEach(fe) => fe.returns,
+        NodeKind::Match(m) => m.arms.iter().any(|a| match &a.body {
+            ArmBodyIr::Body(b) => body_can_return(b),
+            _ => false,
+        }),
+        _ => false,
+    })
 }
 
 fn arm_external_reads(arm: &ArmIr, out: &mut BTreeSet<String>) {

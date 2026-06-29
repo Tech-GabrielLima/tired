@@ -492,9 +492,9 @@ fn run_block_sync(stmts: &[Stmt], env: &mut Env) -> EvalResult {
                     return Err(RunError::new("assertion failed"));
                 }
             }
-            Stmt::Fetch(_) | Stmt::Parallel { .. } => {
+            Stmt::Fetch(_) | Stmt::Parallel { .. } | Stmt::ForEach { .. } => {
                 return Err(RunError::new(
-                    "a fetch inside an expression-position match arm is not supported; lift it to a statement",
+                    "a fetch or `for` loop inside an expression-position match arm is not supported; lift it to a statement",
                 ));
             }
             Stmt::UsingMock { .. } => {}

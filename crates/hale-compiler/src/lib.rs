@@ -9,11 +9,12 @@ pub mod check;
 pub mod cost;
 pub mod ir;
 pub mod lower;
+pub mod nplus1;
 pub mod optimize;
 pub mod types;
 
 pub use check::{check, Analysis};
-pub use types::{ErrDomain, Type, TypeTable};
+pub use types::{ErrDomain, Label, Type, TypeTable};
 
 use hale_syntax::ast::Program;
 use hale_syntax::diag::Diagnostics;
@@ -52,6 +53,7 @@ pub fn compile(src: &str, path: &str) -> (Option<Compiled>, Diagnostics) {
 
     let (analysis, check_diags) = check(&program);
     diags.extend(check_diags);
+    diags.extend(nplus1::detect(&program));
 
     let (mut main, mut flows, mut tests, mut servers) = lower::lower_program(&program);
     let opt_diags = optimize::optimize(&mut main, &mut flows, &mut tests, &mut servers);
@@ -79,6 +81,7 @@ pub fn analyze(src: &str) -> Diagnostics {
     let (program, mut diags) = hale_syntax::parse(src);
     let (_an, check_diags) = check(&program);
     diags.extend(check_diags);
+    diags.extend(nplus1::detect(&program));
     let (mut main, mut flows, mut tests, mut servers) = lower::lower_program(&program);
     let opt_diags = optimize::optimize(&mut main, &mut flows, &mut tests, &mut servers);
     diags.extend(opt_diags);
